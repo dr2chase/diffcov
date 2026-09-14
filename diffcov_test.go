@@ -117,6 +117,6 @@ func TestDoDiffs(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// Run DoDiffs with sample data (repo root is parent directory)
-	diffcov.DoDiffs(diffBytes, "testdata/sample.cover", "..", "..", 0, 0, false)
+	// Run DoDiffs with sample data
+	diffcov.DoDiffs(diffBytes, "testdata/sample.cover", ".", ".", 0, 0, false)
 }
