@@ -29,6 +29,7 @@ func main() {
 	var diffDir string
 	var diffFile string
 	var modDir string
+	var quiet bool
 	var strip int
 	var staged bool
 	var showTested bool
@@ -42,6 +43,7 @@ func main() {
 	flag.StringVar(&diffDir, "D", diffDir, "diff directory root (typically parent of git or jj repo root)")
 	flag.StringVar(&modDir, "M", modDir, "directory containing go.mod")
 	flag.IntVar(&strip, "S", strip, "number of leading directories to strip from files in diff (useful w/ packages differently named from directory)")
+	flag.BoolVar(&quiet, "q", quiet, "don't complain about garbage inputs")
 	flag.BoolVar(&staged, "staged", staged, "if run no-args, use git --staged to obtain diff (git only)")
 	flag.BoolVar(&staged, "cached", staged, "if run no-args, use git --staged to obtain diff (git only)")
 	flag.BoolVar(&showTested, "t", showTested, "also show the tested lines")
@@ -169,13 +171,17 @@ If -M, -D, -S are not provided, %[1]s searches in parent directories for clues.
 				fail("--staged/--cached cannot be used with jj (jujutsu does not have a staging area)\n")
 			}
 		}
+		if verbose > 0 {
+			fmt.Fprintf(os.Stderr, "diffFile=%s, coverprofile=%s, \n", diffFile, coverprofile)
+		}
+
 		diffBytes, err = os.ReadFile(diffFile)
 		if err != nil {
 			fail("could not read diff from %s, error was %v\n", diffFile, err)
 		}
 	}
 
-	diffcov.DoDiffs(diffBytes, coverprofile, diffDir, modDir, strip, int(verbose), showTested)
+	diffcov.DoDiffs(diffBytes, coverprofile, diffDir, modDir, strip, int(verbose), showTested, quiet)
 }
 
 // Count is a flag.Value that is like a flag.Bool and a flag.Int.

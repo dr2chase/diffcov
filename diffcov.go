@@ -44,45 +44,33 @@ type coverLine struct {
 // 	return (*T)(reuse.F(a, b))
 // }
 
-func DoDiffs(diffBytes []byte, coverprofile string, diffDir, modDir string, strip int, verbose int, showTested bool) {
+func parseGoModPkg(buf []byte) string {
+	lines := strings.Split(string(buf), "\n")
+	for _, s := range lines {
+		s = strings.TrimSpace(s)
+		if strings.HasPrefix(s, "module ") {
+			return strings.TrimSpace(s[len("module"):])
+		}
+	}
+	return ""
+}
+
+func DoDiffs(diffBytes []byte, coverprofile string, diffDir, modDir string, strip int, verbose int, showTested, quiet bool) {
 	diff, err := diffparser.Parse(string(diffBytes))
 	must(err)
 	var coverage map[string][]coverLine
 	var gomodpkg string
 
 	if coverprofile != "" {
-		coverage = readCoverProfile(coverprofile)
+		coverage = readCoverProfile(coverprofile, quiet)
 
-		// The file names in the coverprofile use the package in go.mod
-		gomod := filepath.Join(modDir, "go.mod")
-		buf, err := os.ReadFile(gomod)
 		if modDir != "" {
+			// The file names in the coverprofile use the package in go.mod
+			gomod := filepath.Join(modDir, "go.mod")
+			buf, err := os.ReadFile(gomod)
 			must(err)
-		} else {
-			modDepth := 0
-			// Try to automate go.mod location
-			for err != nil && modDepth < 20 {
-				modDepth++
-				modDir = filepath.Join("..", modDir)
-				gomod = filepath.Join(modDir, "go.mod")
-				buf, err = os.ReadFile(gomod)
-			}
-			if verbose > 1 {
-				fmt.Fprintf(os.Stderr, "Automated go.mod location returns modDir=%s, modDepth=%d, err=%v\n", modDir, modDepth, err)
-			}
-			must(err)
+			gomodpkg = parseGoModPkg(buf)
 		}
-
-		lines := strings.Split(string(buf), "\n")
-
-		for _, s := range lines {
-			s = strings.TrimSpace(s)
-			if strings.HasPrefix(s, "module ") {
-				gomodpkg = strings.TrimSpace(s[len("module"):])
-				break
-			}
-		}
-
 	}
 
 	for _, f := range diff.Files {
@@ -92,23 +80,24 @@ func DoDiffs(diffBytes []byte, coverprofile string, diffDir, modDir string, stri
 			fn = filepath.Join(diffDir, fn)
 		} else {
 			// try to find it.
-			diffDir = modDir
+			searchDir := modDir
+			if searchDir == "" {
+				searchDir = "."
+			}
 			computedStrip := 0
 			for computedStrip < 20 {
-				tfn := filepath.Join(diffDir, fn)
+				tfn := filepath.Join(searchDir, fn)
 				_, err = os.Stat(tfn)
 				if err == nil {
+					diffDir = searchDir
 					fn = tfn
-					if strip == 0 {
-						strip = computedStrip
-					}
 					if verbose > 1 {
 						fmt.Fprintf(os.Stderr, "Automated diffDir location returns diffDir=%s, computedStrip=%d, strip=%d\n",
 							diffDir, computedStrip, strip)
 					}
 					break
 				}
-				diffDir = filepath.Join(diffDir, "..")
+				searchDir = filepath.Join(searchDir, "..")
 				computedStrip++
 			}
 			must(err)
@@ -116,23 +105,64 @@ func DoDiffs(diffBytes []byte, coverprofile string, diffDir, modDir string, stri
 
 		lines := ReadFile(fn)
 
-		pfn := f.NewName
-		for i := 0; i < strip; i++ {
-			slash := strings.IndexByte(pfn, byte(os.PathSeparator))
-			if slash == -1 {
-				break
-			}
-			pfn = pfn[slash+1:]
-		}
-
 		var covered []coverLine
 		if coverage != nil {
+			fileModDir := modDir
+			fileGomodpkg := gomodpkg
+			absFn, err := filepath.Abs(fn)
+			must(err)
+			if fileModDir == "" {
+				curDir := filepath.Dir(absFn)
+				var buf []byte
+				modDepth := 0
+				// Try to automate go.mod location starting from the file's directory
+				for modDepth < 20 {
+					gomod := filepath.Join(curDir, "go.mod")
+					buf, err = os.ReadFile(gomod)
+					if err == nil {
+						break
+					}
+					parent := filepath.Dir(curDir)
+					if parent == curDir {
+						break
+					}
+					curDir = parent
+					modDepth++
+				}
+				if verbose > 1 {
+					fmt.Fprintf(os.Stderr, "Automated go.mod location for %s returns modDir=%s, modDepth=%d, err=%v\n", fn, curDir, modDepth, err)
+				}
+				must(err)
+				fileModDir = curDir
+				fileGomodpkg = parseGoModPkg(buf)
+			}
 
+			pfn := f.NewName
+			if strip > 0 {
+				for i := 0; i < strip; i++ {
+					slash := strings.IndexByte(pfn, byte(os.PathSeparator))
+					if slash == -1 {
+						break
+					}
+					pfn = pfn[slash+1:]
+				}
+			} else if fileModDir != "" {
+				absModDir, err := filepath.Abs(fileModDir)
+				must(err)
+				rel, err := filepath.Rel(absModDir, absFn)
+				must(err)
+				pfn = rel
+			}
+
+			target := filepath.Join(fileGomodpkg, pfn)
+			if fileGomodpkg == "std" {
+				target = pfn
+			}
 			for k, v := range coverage {
 				if verbose > 3 {
-					fmt.Fprintf(os.Stderr, "Trying to match %s against %s, gomodpkg=%s\n", pfn, k, gomodpkg)
+					fmt.Fprintf(os.Stderr, "Trying to match %s against %s, gomodpkg=%s\n", pfn, k, fileGomodpkg)
 				}
-				if strings.HasSuffix(k, filepath.Join(gomodpkg, pfn)) {
+				if strings.HasSuffix(k, target) {
 					covered = v
 					break
 				}
@@ -171,8 +201,8 @@ func DoDiffs(diffBytes []byte, coverprofile string, diffDir, modDir string, stri
 var coverRE = regexp.MustCompile("^(.*):([0-9]+)[.]([0-9]+),([0-9]+)[.]([0-9]+) ([0-9]+) ([0-9]+)$")
 
 // readCoverProfile reads the output of "go test -coverprofile XXX"
-// and converts it into a map from package-qualified file nams to coverage information.
-func readCoverProfile(fName string) map[string][]coverLine {
+// and converts it into a map from package-qualified file names to coverage information.
+func readCoverProfile(fName string, quiet bool) map[string][]coverLine {
 
 	coverLines := make(map[string][]coverLine)
 
@@ -190,7 +220,9 @@ func readCoverProfile(fName string) map[string][]coverLine {
 		}
 		parts := coverRE.FindStringSubmatch(l)
 		if len(parts) != 8 {
-			fmt.Fprintf(os.Stderr, "Line %d failed to match cover line RE, line = '%s'\n", i, l)
+			if !quiet {
+				fmt.Fprintf(os.Stderr, "Line %d failed to match cover line RE, line = '%s'\n", i, l)
+			}
 			continue
 		}
 
@@ -239,6 +271,8 @@ func ReadFile(fileName string) (lines map[int]ast.Stmt) {
 			// Crudely, we only care about statements.
 		case *ast.EmptyStmt:
 			return false
+		case *ast.BlockStmt, *ast.CaseClause, *ast.CommClause:
+			return true
 		case ast.Stmt:
 			pos := fset.Position(n.Pos())
 			if lines[pos.Line] == nil {
