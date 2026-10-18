@@ -7,7 +7,7 @@ It compares a diff against a test coverage profile and reports any new or modifi
 ## Installation
 
 ```sh
-go install github.com/dr2chase/diffcov/cmd/diffcov@latest
+go install dr2cha.se/diffcov/cmd/diffcov@latest
 ```
 
 ## Quick Start
