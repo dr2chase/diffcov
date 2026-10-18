@@ -62,6 +62,8 @@ Running '%[1]s' with no options tends to work, so try that first and ignore the 
 '%[1]s [options] [-d] diffFile' reports all the new statements in diffFile.
 '%[1]s [no options]' will attempt to run 'git diff' or 'jj diff --git' (autodetected) and 'go test -coverprofile' to automatically generate -c/-d files.
 If -M, -D, -S are not provided, %[1]s searches in parent directories for clues.
+
+To update: go install dr2cha.se/diffcov@latest
 `, os.Args[0])
 	}
 
