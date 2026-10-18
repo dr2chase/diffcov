@@ -1,4 +1,4 @@
-module github.com/dr2chase/diffcov
+module dr2cha.se/diffcov
 
 go 1.27
 

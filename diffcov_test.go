@@ -13,7 +13,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/dr2chase/diffcov"
+	"dr2cha.se/diffcov"
 )
 
 func TestDetectVCS(t *testing.T) {

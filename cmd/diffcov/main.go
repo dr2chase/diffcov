@@ -12,7 +12,7 @@ import (
 	"path/filepath"
 	"strconv"
 
-	"github.com/dr2chase/diffcov"
+	"dr2cha.se/diffcov"
 )
 
 func fail(format string, args ...any) {
