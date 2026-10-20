@@ -173,6 +173,20 @@ func Helper(y int) int {
 		t.Fatal(err)
 	}
 
+	simdTestGo := `package simd
+
+import "testing"
+
+func TestHelper(t *testing.T) {
+	if Helper(2) != 4 {
+		t.Fatal("unexpected result")
+	}
+}
+`
+	if err := os.WriteFile(filepath.Join(simdDir, "simd_test.go"), []byte(simdTestGo), 0644); err != nil {
+		t.Fatal(err)
+	}
+
 	diffText := `diff --git a/src/cmd/compile/internal/midway/rewrite.go b/src/cmd/compile/internal/midway/rewrite.go
 index 1111111..2222222 100644
 --- a/src/cmd/compile/internal/midway/rewrite.go
@@ -199,6 +213,20 @@ index 3333333..4444444 100644
 +		return y * 2
 +	}
 +	return 0
++}
+diff --git a/src/simd/simd_test.go b/src/simd/simd_test.go
+index 5555555..6666666 100644
+--- a/src/simd/simd_test.go
++++ b/src/simd/simd_test.go
+@@ -1,3 +1,9 @@
+ package simd
+ 
+ import "testing"
++
++func TestHelper(t *testing.T) {
++	if Helper(2) != 4 {
++		t.Fatal("unexpected result")
++	}
 +}
 `
 
@@ -259,5 +287,8 @@ simd/simd.go:7.2,7.10 1 0
 	}
 	if !strings.Contains(out, "return 0") {
 		t.Errorf("expected 'return 0' to be untested, got output:\n%s", out)
+	}
+	if strings.Contains(out, "simd_test.go") || strings.Contains(out, "unexpected result") {
+		t.Errorf("expected _test.go files to be ignored, got output:\n%s", out)
 	}
 }

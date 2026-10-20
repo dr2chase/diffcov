@@ -222,6 +222,69 @@ func Sub(a, b int) int {
 	if !strings.Contains(string(out), "Untested: main.go") || !strings.Contains(string(out), "return a - b") {
 		t.Errorf("expected untested report for Sub with --staged, got:\n%s", string(out))
 	}
+
+	// Commit the change (which adds both tested Mul and untested Sub), export diff to file,
+	// and run diffcov -d head.diffs without -c: it should still run go test automatically.
+	modifiedWithTested := `package testpkg
+
+func Add(a, b int) int {
+	return a + b
+}
+
+func Mul(a, b int) int {
+	return a * b
+}
+
+func Sub(a, b int) int {
+	return a - b
+}
+`
+	if err := os.WriteFile(filepath.Join(tmpDir, "main.go"), []byte(modifiedWithTested), 0644); err != nil {
+		t.Fatal(err)
+	}
+	testWithMul := `package testpkg
+
+import "testing"
+
+func TestAddAndMul(t *testing.T) {
+	if Add(1, 2) != 3 || Mul(2, 3) != 6 {
+		t.Fail()
+	}
+}
+`
+	if err := os.WriteFile(filepath.Join(tmpDir, "main_test.go"), []byte(testWithMul), 0644); err != nil {
+		t.Fatal(err)
+	}
+	diffOutCmd := exec.Command("git", "diff", "HEAD")
+	diffOutCmd.Dir = tmpDir
+	diffBytes, err := diffOutCmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("git diff HEAD failed: %v", err)
+	}
+	diffFile := filepath.Join(tmpDir, "head.diffs")
+	if err := os.WriteFile(diffFile, diffBytes, 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	goPath, err := exec.LookPath("go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	cmd = exec.Command(bin, "-g", goPath, "-d", "head.diffs")
+	cmd.Dir = tmpDir
+	out, err = cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("diffcov -g %s -d head.diffs failed: %v, output:\n%s", goPath, err, string(out))
+	}
+	if strings.Contains(string(out), "return a * b") {
+		t.Errorf("expected tested function Mul not to be reported as untested, got:\n%s", string(out))
+	}
+	if !strings.Contains(string(out), "return a - b") {
+		t.Errorf("expected untested function Sub to be reported as untested, got:\n%s", string(out))
+	}
+	if strings.Contains(string(out), "main_test.go") {
+		t.Errorf("expected changes in main_test.go to be ignored, got:\n%s", string(out))
+	}
 }
 
 func TestJJWorkflow(t *testing.T) {

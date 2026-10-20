@@ -75,6 +75,9 @@ func DoDiffs(diffBytes []byte, coverprofile string, diffDir, modDir string, stri
 
 	for _, f := range diff.Files {
 		fn := f.NewName
+		if strings.HasSuffix(fn, "_test.go") {
+			continue
+		}
 
 		if diffDir != "" {
 			fn = filepath.Join(diffDir, fn)
@@ -241,7 +244,7 @@ func readCoverProfile(fName string, quiet bool) map[string][]coverLine {
 // ReadFile parses fileName and returns a map of lines to statements.
 func ReadFile(fileName string) (lines map[int]ast.Stmt) {
 	lines = make(map[int]ast.Stmt)
-	if !strings.HasSuffix(fileName, ".go") {
+	if !strings.HasSuffix(fileName, ".go") || strings.HasSuffix(fileName, "_test.go") {
 		return
 	}
 	fset := token.NewFileSet() // positions are relative to fset

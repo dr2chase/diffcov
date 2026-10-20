@@ -28,6 +28,7 @@ func main() {
 	var coverprofile string
 	var diffDir string
 	var diffFile string
+	var goCmd = "go"
 	var modDir string
 	var quiet bool
 	var strip int
@@ -41,6 +42,7 @@ func main() {
 	flag.StringVar(&coverprofile, "c", coverprofile, "name of test -coverprofile output file")
 	flag.StringVar(&diffFile, "d", diffFile, "name of (git or jj) diff output file")
 	flag.StringVar(&diffDir, "D", diffDir, "diff directory root (typically parent of git or jj repo root)")
+	flag.StringVar(&goCmd, "g", goCmd, "go command to use for running tests")
 	flag.StringVar(&modDir, "M", modDir, "directory containing go.mod")
 	flag.IntVar(&strip, "S", strip, "number of leading directories to strip from files in diff (useful w/ packages differently named from directory)")
 	flag.BoolVar(&quiet, "q", quiet, "don't complain about garbage inputs")
@@ -58,9 +60,9 @@ func main() {
 Running '%[1]s' with no options tends to work, so try that first and ignore the rest of this documentation.
 '%[1]s' uses diff and test coverage data to point out any new or modified code in the diff that is not exercised by tests.
 
-'%[1]s [options] -c coverprofile [-d] diffFile' reports the new statements in diffFile that do not appear in the coverprofile.
-'%[1]s [options] [-d] diffFile' reports all the new statements in diffFile.
-'%[1]s [no options]' will attempt to run 'git diff' or 'jj diff --git' (autodetected) and 'go test -coverprofile' to automatically generate -c/-d files.
+'%[1]s [options] [-c coverprofile] [[-d] diffFile]' reports the new statements in diffFile that do not appear in the coverprofile.
+If -d (and diffFile) is omitted, '%[1]s' will attempt to run 'git diff' or 'jj diff --git' (autodetected) to obtain the diff.
+If -c is omitted, '%[1]s' will attempt to run 'go test -coverprofile' to obtain coverage data.
 If -M, -D, -S are not provided, %[1]s searches in parent directories for clues.
 
 To update: go install dr2cha.se/diffcov/...@latest
@@ -141,28 +143,6 @@ To update: go install dr2cha.se/diffcov/...@latest
 		if len(diffBytes) == 0 {
 			fail("%s returned empty output, perhaps there is a problem with the directory or the flags?\n", cmdDesc)
 		}
-
-		if coverprofile == "" {
-			coverDir, err := os.MkdirTemp("", "diffcov")
-			if err != nil {
-				fail("failed to create temporary dir, err=%v\n", err)
-			}
-
-			coverprofile = filepath.Join(coverDir, "coverprofile.out")
-
-			testArgs := []string{"test", "-coverprofile", coverprofile, "."}
-			testCmd := exec.Command("go", testArgs...)
-			if verbose > 0 {
-				fmt.Fprintf(os.Stderr, "Running go test, args=%v\n", testArgs)
-			}
-			coverOut, err := testCmd.CombinedOutput()
-			if err != nil {
-				fail("%s\nfailed to run go test ..., err=%v\n", string(coverOut), err)
-			}
-			if verbose > 0 {
-				fmt.Fprintf(os.Stderr, "%s\n", string(coverOut))
-			}
-		}
 	} else {
 		if staged {
 			checkVCS := vcs
@@ -180,6 +160,29 @@ To update: go install dr2cha.se/diffcov/...@latest
 		diffBytes, err = os.ReadFile(diffFile)
 		if err != nil {
 			fail("could not read diff from %s, error was %v\n", diffFile, err)
+		}
+	}
+
+	if coverprofile == "" {
+		coverDir, err := os.MkdirTemp("", "diffcov")
+		if err != nil {
+			fail("failed to create temporary dir, err=%v\n", err)
+		}
+		defer os.RemoveAll(coverDir)
+
+		coverprofile = filepath.Join(coverDir, "coverprofile.out")
+
+		testArgs := []string{"test", "-coverprofile", coverprofile, "."}
+		testCmd := exec.Command(goCmd, testArgs...)
+		if verbose > 0 {
+			fmt.Fprintf(os.Stderr, "Running %s, args=%v\n", goCmd, testArgs)
+		}
+		coverOut, err := testCmd.CombinedOutput()
+		if err != nil {
+			fail("%s\nfailed to run %s test ..., err=%v\n", string(coverOut), goCmd, err)
+		}
+		if verbose > 0 {
+			fmt.Fprintf(os.Stderr, "%s\n", string(coverOut))
 		}
 	}
 

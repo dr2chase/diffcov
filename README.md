@@ -74,6 +74,7 @@ Note: `-staged` and `-cached` require Git; Jujutsu does not have a staging area.
 | `-t` | Also show tested lines. |
 | `-c <file>` | Path to coverage profile (`go test -coverprofile` output). |
 | `-d <file>` | Path to diff file (or pass as a single positional argument). |
+| `-g <cmd>` | Go command to use for running tests (default `go`). |
 | `-git` | Use Git to obtain diff. |
 | `-jj` | Use Jujutsu (`jj`) to obtain diff. |
 | `-vcs <git\|jj>` | Revision control system to use (`git` or `jj`). |
