@@ -34,6 +34,16 @@ diffcov -staged
 
 (`-cached` is supported as an alias).
 
+### Check entire source files instead of a diff
+
+```sh
+# Check all non-test .go files in the current directory
+diffcov -a
+
+# Check specific source files or directories
+diffcov -a foo.go bar.go
+```
+
 ### Include tested lines in output
 
 ```sh
@@ -70,6 +80,7 @@ Note: `-staged` and `-cached` require Git; Jujutsu does not have a staging area.
 
 | Flag | Description |
 | --- | --- |
+| `-a` | Check coverage of entire source file(s) instead of using diff input. |
 | `-staged`, `-cached` | Use `git diff --staged` to obtain diff (Git only). |
 | `-t` | Also show tested lines. |
 | `-c <file>` | Path to coverage profile (`go test -coverprofile` output). |

@@ -51,6 +51,7 @@ func TestFlagUsage(t *testing.T) {
 
 	out := stderr.String()
 	for _, expected := range []string{
+		"-a",
 		"-git",
 		"-jj",
 		"-vcs",
@@ -76,7 +77,7 @@ func TestConflictingFlags(t *testing.T) {
 		t.Errorf("expected conflict error, got:\n%s", string(out))
 	}
 
-	// Invalid -vcs
+	//Invalid -vcs
 	cmd = exec.Command(bin, "-vcs", "invalid")
 	out, err = cmd.CombinedOutput()
 	if err == nil {
@@ -114,6 +115,16 @@ func TestConflictingFlags(t *testing.T) {
 	}
 	if !strings.Contains(string(out), "cannot specify diff file both") {
 		t.Errorf("expected duplicate diff file error, got:\n%s", string(out))
+	}
+
+	// Both -a and -d
+	cmd = exec.Command(bin, "-a", "-d", "diff1")
+	out, err = cmd.CombinedOutput()
+	if err == nil {
+		t.Errorf("expected error with both -a and -d, got success")
+	}
+	if !strings.Contains(string(out), "cannot specify both -a and -d") {
+		t.Errorf("expected -a and -d conflict error, got:\n%s", string(out))
 	}
 }
 
@@ -386,6 +397,88 @@ func Div(a, b int) int {
 	}
 	if !strings.Contains(string(out), "--staged/--cached cannot be used with jj (jujutsu does not have a staging area)") {
 		t.Errorf("expected staging area misuse diagnosis in jj repo, got:\n%s", string(out))
+	}
+}
+
+func TestAllFlagWorkflow(t *testing.T) {
+	bin := getDiffcovBin(t)
+	tmpDir := t.TempDir()
+
+	// Note: no .git or .jj initialization needed when -a is used.
+	goMod := "module example.com/testall\n\ngo 1.20\n"
+	if err := os.WriteFile(filepath.Join(tmpDir, "go.mod"), []byte(goMod), 0644); err != nil {
+		t.Fatal(err)
+	}
+	mainGo := `package testall
+
+func Add(a, b int) int {
+	return a + b
+}
+
+func Sub(a, b int) int {
+	return a - b
+}
+`
+	if err := os.WriteFile(filepath.Join(tmpDir, "main.go"), []byte(mainGo), 0644); err != nil {
+		t.Fatal(err)
+	}
+	extraGo := `package testall
+
+func Extra(x int) int {
+	return x * 2
+}
+`
+	if err := os.WriteFile(filepath.Join(tmpDir, "extra.go"), []byte(extraGo), 0644); err != nil {
+		t.Fatal(err)
+	}
+	testGo := `package testall
+
+import "testing"
+
+func TestAdd(t *testing.T) {
+	if Add(1, 2) != 3 {
+		t.Fail()
+	}
+}
+`
+	if err := os.WriteFile(filepath.Join(tmpDir, "main_test.go"), []byte(testGo), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	// 1. Run diffcov -a with no arguments: should check all non-test .go files in current directory.
+	cmd := exec.Command(bin, "-a")
+	cmd.Dir = tmpDir
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("diffcov -a failed: %v, output:\n%s", err, string(out))
+	}
+	outStr := string(out)
+	if strings.Contains(outStr, "return a + b") {
+		t.Errorf("expected Add to be tested, got:\n%s", outStr)
+	}
+	if !strings.Contains(outStr, "Untested: main.go") || !strings.Contains(outStr, "return a - b") {
+		t.Errorf("expected untested report for Sub in main.go, got:\n%s", outStr)
+	}
+	if !strings.Contains(outStr, "Untested: extra.go") || !strings.Contains(outStr, "return x * 2") {
+		t.Errorf("expected untested report for Extra in extra.go, got:\n%s", outStr)
+	}
+	if strings.Contains(outStr, "main_test.go") {
+		t.Errorf("expected main_test.go to be ignored, got:\n%s", outStr)
+	}
+
+	// 2. Run diffcov -a main.go: should only check main.go, not extra.go.
+	cmd = exec.Command(bin, "-a", "main.go")
+	cmd.Dir = tmpDir
+	out, err = cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("diffcov -a main.go failed: %v, output:\n%s", err, string(out))
+	}
+	outStr = string(out)
+	if !strings.Contains(outStr, "Untested: main.go") || !strings.Contains(outStr, "return a - b") {
+		t.Errorf("expected untested report for Sub in main.go, got:\n%s", outStr)
+	}
+	if strings.Contains(outStr, "extra.go") {
+		t.Errorf("expected extra.go not to be checked when only main.go was specified, got:\n%s", outStr)
 	}
 }
 

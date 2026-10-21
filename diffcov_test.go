@@ -292,3 +292,57 @@ simd/simd.go:7.2,7.10 1 0
 		t.Errorf("expected _test.go files to be ignored, got output:\n%s", out)
 	}
 }
+
+func TestDoFiles(t *testing.T) {
+	tmpDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(tmpDir, "go.mod"), []byte("module example.com/pkg\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	src := `package pkg
+
+func Covered(x int) int {
+	return x + 1
+}
+
+func Uncovered(x int) int {
+	return x - 1
+}
+`
+	srcFile := filepath.Join(tmpDir, "pkg.go")
+	if err := os.WriteFile(srcFile, []byte(src), 0644); err != nil {
+		t.Fatal(err)
+	}
+	coverText := `mode: set
+example.com/pkg/pkg.go:3.25,5.2 1 1
+example.com/pkg/pkg.go:7.27,9.2 1 0
+`
+	coverFile := filepath.Join(tmpDir, "cover.out")
+	if err := os.WriteFile(coverFile, []byte(coverText), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	origStdout := os.Stdout
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	os.Stdout = w
+
+	diffcov.DoFiles([]string{srcFile}, coverFile, "", 0, 0, false, true)
+
+	w.Close()
+	os.Stdout = origStdout
+
+	var buf bytes.Buffer
+	if _, err := io.Copy(&buf, r); err != nil {
+		t.Fatal(err)
+	}
+	out := buf.String()
+
+	if strings.Contains(out, "return x + 1") {
+		t.Errorf("expected 'return x + 1' to be tested, got output:\n%s", out)
+	}
+	if !strings.Contains(out, "return x - 1") {
+		t.Errorf("expected 'return x - 1' to be untested, got output:\n%s", out)
+	}
+}

@@ -58,8 +58,49 @@ func parseGoModPkg(buf []byte) string {
 func DoDiffs(diffBytes []byte, coverprofile string, diffDir, modDir string, strip int, verbose int, showTested, quiet bool) {
 	diff, err := diffparser.Parse(string(diffBytes))
 	must(err)
+	doDiff(diff, coverprofile, diffDir, modDir, strip, verbose, showTested, quiet, false)
+}
+
+func DoFiles(files []string, coverprofile string, modDir string, strip int, verbose int, showTested, quiet bool) {
+	var diffFiles []*diffparser.DiffFile
+	for _, fn := range files {
+		if !strings.HasSuffix(fn, ".go") || strings.HasSuffix(fn, "_test.go") {
+			continue
+		}
+		buf, err := os.ReadFile(fn)
+		must(err)
+		rawLines := strings.Split(string(buf), "\n")
+		if len(rawLines) > 0 && rawLines[len(rawLines)-1] == "" {
+			rawLines = rawLines[:len(rawLines)-1]
+		}
+		diffLines := make([]*diffparser.DiffLine, len(rawLines))
+		for i, content := range rawLines {
+			content = strings.TrimSuffix(content, "\r")
+			diffLines[i] = &diffparser.DiffLine{
+				Mode:    diffparser.ADDED,
+				Number:  i + 1,
+				Content: content,
+			}
+		}
+		diffFiles = append(diffFiles, &diffparser.DiffFile{
+			NewName: fn,
+			Hunks: []*diffparser.DiffHunk{
+				{
+					NewRange: diffparser.DiffRange{
+						Lines: diffLines,
+					},
+				},
+			},
+		})
+	}
+	diff := &diffparser.Diff{Files: diffFiles}
+	doDiff(diff, coverprofile, "", modDir, strip, verbose, showTested, quiet, true)
+}
+
+func doDiff(diff *diffparser.Diff, coverprofile string, diffDir, modDir string, strip int, verbose int, showTested, quiet, fromFiles bool) {
 	var coverage map[string][]coverLine
 	var gomodpkg string
+	var err error
 
 	if coverprofile != "" {
 		coverage = readCoverProfile(coverprofile, quiet)
@@ -79,31 +120,33 @@ func DoDiffs(diffBytes []byte, coverprofile string, diffDir, modDir string, stri
 			continue
 		}
 
-		if diffDir != "" {
-			fn = filepath.Join(diffDir, fn)
-		} else {
-			// try to find it.
-			searchDir := modDir
-			if searchDir == "" {
-				searchDir = "."
-			}
-			computedStrip := 0
-			for computedStrip < 20 {
-				tfn := filepath.Join(searchDir, fn)
-				_, err = os.Stat(tfn)
-				if err == nil {
-					diffDir = searchDir
-					fn = tfn
-					if verbose > 1 {
-						fmt.Fprintf(os.Stderr, "Automated diffDir location returns diffDir=%s, computedStrip=%d, strip=%d\n",
-							diffDir, computedStrip, strip)
-					}
-					break
+		if !fromFiles {
+			if diffDir != "" {
+				fn = filepath.Join(diffDir, fn)
+			} else {
+				// try to find it.
+				searchDir := modDir
+				if searchDir == "" {
+					searchDir = "."
 				}
-				searchDir = filepath.Join(searchDir, "..")
-				computedStrip++
+				computedStrip := 0
+				for computedStrip < 20 {
+					tfn := filepath.Join(searchDir, fn)
+					_, err = os.Stat(tfn)
+					if err == nil {
+						diffDir = searchDir
+						fn = tfn
+						if verbose > 1 {
+							fmt.Fprintf(os.Stderr, "Automated diffDir location returns diffDir=%s, computedStrip=%d, strip=%d\n",
+								diffDir, computedStrip, strip)
+						}
+						break
+					}
+					searchDir = filepath.Join(searchDir, "..")
+					computedStrip++
+				}
+				must(err)
 			}
-			must(err)
 		}
 
 		lines := ReadFile(fn)
