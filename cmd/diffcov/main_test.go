@@ -2,10 +2,13 @@
 // Use of this source code is governed by a BSD-style
 // license that can be found in the LICENSE file.
 
-package main_test
+package main
 
 import (
 	"bytes"
+	"flag"
+	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -42,6 +45,89 @@ func getDiffcovBin(t *testing.T) string {
 	return diffcovPath
 }
 
+type exitError int
+
+func (e exitError) Error() string {
+	return fmt.Sprintf("exit status %d", int(e))
+}
+
+func runDiffcov(t *testing.T, dir string, args ...string) (string, error) {
+	t.Helper()
+	origArgs := os.Args
+	origCommandLine := flag.CommandLine
+	origStdout := os.Stdout
+	origStderr := os.Stderr
+	origExit := osExit
+	origWd, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	os.Stdout = w
+	os.Stderr = w
+
+	fs := flag.NewFlagSet("diffcov", flag.ContinueOnError)
+	fs.SetOutput(w)
+	flag.CommandLine = fs
+	os.Args = append([]string{"diffcov"}, args...)
+	osExit = func(code int) {
+		panic(exitError(code))
+	}
+
+	if dir != "" {
+		if err := os.Chdir(dir); err != nil {
+			w.Close()
+			r.Close()
+			os.Stdout = origStdout
+			os.Stderr = origStderr
+			flag.CommandLine = origCommandLine
+			os.Args = origArgs
+			osExit = origExit
+			t.Fatal(err)
+		}
+	}
+
+	var outBuf bytes.Buffer
+	done := make(chan struct{})
+	go func() {
+		_, _ = io.Copy(&outBuf, r)
+		close(done)
+	}()
+
+	var runErr error
+	func() {
+		defer func() {
+			if rec := recover(); rec != nil {
+				if ee, ok := rec.(exitError); ok {
+					runErr = ee
+				} else {
+					panic(rec)
+				}
+			}
+		}()
+		main()
+	}()
+
+	w.Close()
+	<-done
+	r.Close()
+
+	if dir != "" {
+		_ = os.Chdir(origWd)
+	}
+	os.Stdout = origStdout
+	os.Stderr = origStderr
+	flag.CommandLine = origCommandLine
+	os.Args = origArgs
+	osExit = origExit
+
+	return outBuf.String(), runErr
+}
+
 func TestFlagUsage(t *testing.T) {
 	bin := getDiffcovBin(t)
 	cmd := exec.Command(bin, "-h")
@@ -65,90 +151,115 @@ func TestFlagUsage(t *testing.T) {
 }
 
 func TestConflictingFlags(t *testing.T) {
-	bin := getDiffcovBin(t)
-
 	// Both -git and -jj
-	cmd := exec.Command(bin, "-git", "-jj")
-	out, err := cmd.CombinedOutput()
+	out, err := runDiffcov(t, "", "-git", "-jj")
 	if err == nil {
 		t.Errorf("expected error when passing -git and -jj, got success")
 	}
-	if !strings.Contains(string(out), "cannot specify both -git and -jj") {
-		t.Errorf("expected conflict error, got:\n%s", string(out))
+	if !strings.Contains(out, "cannot specify both -git and -jj") {
+		t.Errorf("expected conflict error, got:\n%s", out)
 	}
 
-	//Invalid -vcs
-	cmd = exec.Command(bin, "-vcs", "invalid")
-	out, err = cmd.CombinedOutput()
+	// Invalid -vcs
+	out, err = runDiffcov(t, "", "-vcs", "invalid")
 	if err == nil {
 		t.Errorf("expected error when passing invalid -vcs, got success")
 	}
-	if !strings.Contains(string(out), "unsupported revision control system") {
-		t.Errorf("expected unsupported vcs error, got:\n%s", string(out))
+	if !strings.Contains(out, "unsupported revision control system") {
+		t.Errorf("expected unsupported vcs error, got:\n%s", out)
 	}
 
 	// Conflicting -git and -vcs=jj
-	cmd = exec.Command(bin, "-git", "-vcs=jj")
-	out, err = cmd.CombinedOutput()
+	out, err = runDiffcov(t, "", "-git", "-vcs=jj")
 	if err == nil {
 		t.Errorf("expected error when passing conflicting -git and -vcs=jj, got success")
 	}
-	if !strings.Contains(string(out), "conflicting revision control flags") {
-		t.Errorf("expected conflicting flags error, got:\n%s", string(out))
+	if !strings.Contains(out, "conflicting revision control flags") {
+		t.Errorf("expected conflicting flags error, got:\n%s", out)
 	}
 
 	// Too many arguments
-	cmd = exec.Command(bin, "diff1", "diff2")
-	out, err = cmd.CombinedOutput()
+	out, err = runDiffcov(t, "", "diff1", "diff2")
 	if err == nil {
 		t.Errorf("expected error with too many arguments, got success")
 	}
-	if !strings.Contains(string(out), "too many arguments") {
-		t.Errorf("expected too many arguments error, got:\n%s", string(out))
+	if !strings.Contains(out, "too many arguments") {
+		t.Errorf("expected too many arguments error, got:\n%s", out)
 	}
 
 	// Both -d and positional argument
-	cmd = exec.Command(bin, "-d", "diff1", "diff2")
-	out, err = cmd.CombinedOutput()
+	out, err = runDiffcov(t, "", "-d", "diff1", "diff2")
 	if err == nil {
 		t.Errorf("expected error with both -d and positional arg, got success")
 	}
-	if !strings.Contains(string(out), "cannot specify diff file both") {
-		t.Errorf("expected duplicate diff file error, got:\n%s", string(out))
+	if !strings.Contains(out, "cannot specify diff file both") {
+		t.Errorf("expected duplicate diff file error, got:\n%s", out)
 	}
 
 	// Both -a and -d
-	cmd = exec.Command(bin, "-a", "-d", "diff1")
-	out, err = cmd.CombinedOutput()
+	out, err = runDiffcov(t, "", "-a", "-d", "diff1")
 	if err == nil {
 		t.Errorf("expected error with both -a and -d, got success")
 	}
-	if !strings.Contains(string(out), "cannot specify both -a and -d") {
-		t.Errorf("expected -a and -d conflict error, got:\n%s", string(out))
+	if !strings.Contains(out, "cannot specify both -a and -d") {
+		t.Errorf("expected -a and -d conflict error, got:\n%s", out)
+	}
+
+	// Both -a and VCS/diff flags
+	out, err = runDiffcov(t, "", "-a", "-git")
+	if err == nil {
+		t.Errorf("expected error with both -a and -git, got success")
+	}
+	if !strings.Contains(out, "cannot use diff/VCS flags") {
+		t.Errorf("expected -a and VCS conflict error, got:\n%s", out)
+	}
+
+	// Autodetect VCS failure in empty non-repo dir
+	emptyDir := t.TempDir()
+	out, err = runDiffcov(t, emptyDir)
+	if err == nil {
+		t.Errorf("expected error when VCS autodetect fails, got success")
+	}
+	if !strings.Contains(out, "failed to autodetect revision control system") {
+		t.Errorf("expected VCS autodetect error, got:\n%s", out)
+	}
+
+	// git diff command failure in non-git dir
+	out, err = runDiffcov(t, emptyDir, "-vcs=git")
+	if err == nil {
+		t.Errorf("expected error when git diff fails in non-git dir, got success")
+	}
+	if !strings.Contains(out, "failed to run git diff") {
+		t.Errorf("expected git diff failure error, got:\n%s", out)
+	}
+
+	// Missing diff file
+	out, err = runDiffcov(t, emptyDir, "nonexistent.diff")
+	if err == nil {
+		t.Errorf("expected error for missing diff file, got success")
+	}
+	if !strings.Contains(out, "could not read diff from nonexistent.diff") {
+		t.Errorf("expected read diff error, got:\n%s", out)
 	}
 }
 
 func TestStagedWithJJDiagnosed(t *testing.T) {
-	bin := getDiffcovBin(t)
-
 	// Explicit -jj with --staged
-	cmd := exec.Command(bin, "-jj", "--staged")
-	out, err := cmd.CombinedOutput()
+	out, err := runDiffcov(t, "", "-jj", "--staged")
 	if err == nil {
 		t.Errorf("expected error with -jj and --staged, got success")
 	}
-	if !strings.Contains(string(out), "--staged/--cached cannot be used with jj (jujutsu does not have a staging area)") {
-		t.Errorf("expected staging area misuse diagnosis, got:\n%s", string(out))
+	if !strings.Contains(out, "--staged/--cached cannot be used with jj (jujutsu does not have a staging area)") {
+		t.Errorf("expected staging area misuse diagnosis, got:\n%s", out)
 	}
 
 	// Explicit -jj with --cached
-	cmd = exec.Command(bin, "-jj", "--cached")
-	out, err = cmd.CombinedOutput()
+	out, err = runDiffcov(t, "", "-jj", "--cached")
 	if err == nil {
 		t.Errorf("expected error with -jj and --cached, got success")
 	}
-	if !strings.Contains(string(out), "--staged/--cached cannot be used with jj (jujutsu does not have a staging area)") {
-		t.Errorf("expected staging area misuse diagnosis, got:\n%s", string(out))
+	if !strings.Contains(out, "--staged/--cached cannot be used with jj (jujutsu does not have a staging area)") {
+		t.Errorf("expected staging area misuse diagnosis, got:\n%s", out)
 	}
 }
 
@@ -157,7 +268,6 @@ func TestGitWorkflow(t *testing.T) {
 		t.Skip("git not found in PATH")
 	}
 
-	bin := getDiffcovBin(t)
 	tmpDir := t.TempDir()
 
 	// Initialize git repository
@@ -196,6 +306,15 @@ func TestAdd(t *testing.T) {
 	runCmd(t, tmpDir, "git", "add", ".")
 	runCmd(t, tmpDir, "git", "commit", "-m", "initial commit")
 
+	// Clean repo should fail with empty diff output
+	out, err := runDiffcov(t, tmpDir)
+	if err == nil {
+		t.Errorf("expected error on empty git diff, got success")
+	}
+	if !strings.Contains(out, "git diff returned empty output") {
+		t.Errorf("expected empty diff error, got:\n%s", out)
+	}
+
 	// Add an untested function to main.go
 	modifiedGo := `package testpkg
 
@@ -212,26 +331,22 @@ func Sub(a, b int) int {
 	}
 
 	// Run diffcov (autodetect git)
-	cmd := exec.Command(bin)
-	cmd.Dir = tmpDir
-	out, err := cmd.CombinedOutput()
+	out, err = runDiffcov(t, tmpDir, "-v")
 	if err != nil {
-		t.Fatalf("diffcov failed in git repo: %v, output:\n%s", err, string(out))
+		t.Fatalf("diffcov failed in git repo: %v, output:\n%s", err, out)
 	}
-	if !strings.Contains(string(out), "Untested: main.go") || !strings.Contains(string(out), "return a - b") {
-		t.Errorf("expected untested report for Sub, got:\n%s", string(out))
+	if !strings.Contains(out, "Untested: main.go") || !strings.Contains(out, "return a - b") {
+		t.Errorf("expected untested report for Sub, got:\n%s", out)
 	}
 
 	// Stage the change and run with --staged
 	runCmd(t, tmpDir, "git", "add", "main.go")
-	cmd = exec.Command(bin, "--staged")
-	cmd.Dir = tmpDir
-	out, err = cmd.CombinedOutput()
+	out, err = runDiffcov(t, tmpDir, "--staged")
 	if err != nil {
-		t.Fatalf("diffcov --staged failed in git repo: %v, output:\n%s", err, string(out))
+		t.Fatalf("diffcov --staged failed in git repo: %v, output:\n%s", err, out)
 	}
-	if !strings.Contains(string(out), "Untested: main.go") || !strings.Contains(string(out), "return a - b") {
-		t.Errorf("expected untested report for Sub with --staged, got:\n%s", string(out))
+	if !strings.Contains(out, "Untested: main.go") || !strings.Contains(out, "return a - b") {
+		t.Errorf("expected untested report for Sub with --staged, got:\n%s", out)
 	}
 
 	// Commit the change (which adds both tested Mul and untested Sub), export diff to file,
@@ -281,20 +396,18 @@ func TestAddAndMul(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	cmd = exec.Command(bin, "-g", goPath, "-d", "head.diffs")
-	cmd.Dir = tmpDir
-	out, err = cmd.CombinedOutput()
+	out, err = runDiffcov(t, tmpDir, "-v", "-g", goPath, "-d", "head.diffs")
 	if err != nil {
-		t.Fatalf("diffcov -g %s -d head.diffs failed: %v, output:\n%s", goPath, err, string(out))
+		t.Fatalf("diffcov -g %s -d head.diffs failed: %v, output:\n%s", goPath, err, out)
 	}
-	if strings.Contains(string(out), "return a * b") {
-		t.Errorf("expected tested function Mul not to be reported as untested, got:\n%s", string(out))
+	if strings.Contains(out, "return a * b") {
+		t.Errorf("expected tested function Mul not to be reported as untested, got:\n%s", out)
 	}
-	if !strings.Contains(string(out), "return a - b") {
-		t.Errorf("expected untested function Sub to be reported as untested, got:\n%s", string(out))
+	if !strings.Contains(out, "return a - b") {
+		t.Errorf("expected untested function Sub to be reported as untested, got:\n%s", out)
 	}
-	if strings.Contains(string(out), "main_test.go") {
-		t.Errorf("expected changes in main_test.go to be ignored, got:\n%s", string(out))
+	if strings.Contains(out, "main_test.go") {
+		t.Errorf("expected changes in main_test.go to be ignored, got:\n%s", out)
 	}
 }
 
@@ -303,7 +416,6 @@ func TestJJWorkflow(t *testing.T) {
 		t.Skip("jj not found in PATH")
 	}
 
-	bin := getDiffcovBin(t)
 	tmpDir := t.TempDir()
 
 	// Initialize jj repo
@@ -356,52 +468,43 @@ func Div(a, b int) int {
 	}
 
 	// Run diffcov with autodetection (should autodetect jj)
-	cmd := exec.Command(bin)
-	cmd.Dir = tmpDir
-	out, err := cmd.CombinedOutput()
+	out, err := runDiffcov(t, tmpDir, "-v")
 	if err != nil {
-		t.Fatalf("diffcov failed in jj repo: %v, output:\n%s", err, string(out))
+		t.Fatalf("diffcov failed in jj repo: %v, output:\n%s", err, out)
 	}
-	if !strings.Contains(string(out), "Untested: main.go") || !strings.Contains(string(out), "return a / b") {
-		t.Errorf("expected untested report for Div in jj repo, got:\n%s", string(out))
+	if !strings.Contains(out, "Untested: main.go") || !strings.Contains(out, "return a / b") {
+		t.Errorf("expected untested report for Div in jj repo, got:\n%s", out)
 	}
 
 	// Explicit -jj flag should also work
-	cmd = exec.Command(bin, "-jj")
-	cmd.Dir = tmpDir
-	out, err = cmd.CombinedOutput()
+	out, err = runDiffcov(t, tmpDir, "-jj")
 	if err != nil {
-		t.Fatalf("diffcov -jj failed in jj repo: %v, output:\n%s", err, string(out))
+		t.Fatalf("diffcov -jj failed in jj repo: %v, output:\n%s", err, out)
 	}
-	if !strings.Contains(string(out), "Untested: main.go") || !strings.Contains(string(out), "return a / b") {
-		t.Errorf("expected untested report for Div with -jj, got:\n%s", string(out))
+	if !strings.Contains(out, "Untested: main.go") || !strings.Contains(out, "return a / b") {
+		t.Errorf("expected untested report for Div with -jj, got:\n%s", out)
 	}
 
 	// --staged in jj repo should diagnose misuse even without explicit -jj flag
-	cmd = exec.Command(bin, "--staged")
-	cmd.Dir = tmpDir
-	out, err = cmd.CombinedOutput()
+	out, err = runDiffcov(t, tmpDir, "--staged")
 	if err == nil {
 		t.Errorf("expected diffcov --staged to fail in jj repo, but got success")
 	}
-	if !strings.Contains(string(out), "--staged/--cached cannot be used with jj (jujutsu does not have a staging area)") {
-		t.Errorf("expected staging area misuse diagnosis in jj repo, got:\n%s", string(out))
+	if !strings.Contains(out, "--staged/--cached cannot be used with jj (jujutsu does not have a staging area)") {
+		t.Errorf("expected staging area misuse diagnosis in jj repo, got:\n%s", out)
 	}
 
-	// --cached in jj repo should also diagnose misuse
-	cmd = exec.Command(bin, "--cached")
-	cmd.Dir = tmpDir
-	out, err = cmd.CombinedOutput()
+	// --cached with -d in jj repo should also diagnose misuse
+	out, err = runDiffcov(t, tmpDir, "--cached", "-d", "some.diff")
 	if err == nil {
-		t.Errorf("expected diffcov --cached to fail in jj repo, but got success")
+		t.Errorf("expected diffcov --cached -d to fail in jj repo, but got success")
 	}
-	if !strings.Contains(string(out), "--staged/--cached cannot be used with jj (jujutsu does not have a staging area)") {
-		t.Errorf("expected staging area misuse diagnosis in jj repo, got:\n%s", string(out))
+	if !strings.Contains(out, "--staged/--cached cannot be used with jj (jujutsu does not have a staging area)") {
+		t.Errorf("expected staging area misuse diagnosis in jj repo, got:\n%s", out)
 	}
 }
 
 func TestAllFlagWorkflow(t *testing.T) {
-	bin := getDiffcovBin(t)
 	tmpDir := t.TempDir()
 
 	// Note: no .git or .jj initialization needed when -a is used.
@@ -445,14 +548,26 @@ func TestAdd(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// 1. Run diffcov -a with no arguments: should check all non-test .go files in current directory.
-	cmd := exec.Command(bin, "-a")
-	cmd.Dir = tmpDir
-	out, err := cmd.CombinedOutput()
-	if err != nil {
-		t.Fatalf("diffcov -a failed: %v, output:\n%s", err, string(out))
+	// Also create a subdirectory package to test directory traversal and relative/parent paths
+	subDir := filepath.Join(tmpDir, "sub")
+	if err := os.MkdirAll(subDir, 0755); err != nil {
+		t.Fatal(err)
 	}
-	outStr := string(out)
+	subGo := `package sub
+
+func SubHelper(x int) int {
+	return x + 10
+}
+`
+	if err := os.WriteFile(filepath.Join(subDir, "sub.go"), []byte(subGo), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	// 1. Run diffcov -a with no arguments: should check all non-test .go files in current directory.
+	outStr, err := runDiffcov(t, tmpDir, "-a")
+	if err != nil {
+		t.Fatalf("diffcov -a failed: %v, output:\n%s", err, outStr)
+	}
 	if strings.Contains(outStr, "return a + b") {
 		t.Errorf("expected Add to be tested, got:\n%s", outStr)
 	}
@@ -467,18 +582,69 @@ func TestAdd(t *testing.T) {
 	}
 
 	// 2. Run diffcov -a main.go: should only check main.go, not extra.go.
-	cmd = exec.Command(bin, "-a", "main.go")
-	cmd.Dir = tmpDir
-	out, err = cmd.CombinedOutput()
+	outStr, err = runDiffcov(t, tmpDir, "-a", "main.go")
 	if err != nil {
-		t.Fatalf("diffcov -a main.go failed: %v, output:\n%s", err, string(out))
+		t.Fatalf("diffcov -a main.go failed: %v, output:\n%s", err, outStr)
 	}
-	outStr = string(out)
 	if !strings.Contains(outStr, "Untested: main.go") || !strings.Contains(outStr, "return a - b") {
 		t.Errorf("expected untested report for Sub in main.go, got:\n%s", outStr)
 	}
 	if strings.Contains(outStr, "extra.go") {
 		t.Errorf("expected extra.go not to be checked when only main.go was specified, got:\n%s", outStr)
+	}
+
+	// 3. Run diffcov -a with directory argument ("sub") and multiple dirs (abs + subdir)
+	evalTmpDir, err := filepath.EvalSymlinks(tmpDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	outStr, err = runDiffcov(t, tmpDir, "-a", filepath.Join(evalTmpDir, "main.go"), "sub")
+	if err != nil {
+		t.Fatalf("diffcov -a <abs>/main.go sub failed: %v, output:\n%s", err, outStr)
+	}
+	if !strings.Contains(outStr, "return x + 10") {
+		t.Errorf("expected untested report for SubHelper in sub/sub.go, got:\n%s", outStr)
+	}
+
+	// 4. Run diffcov -a with single absolute path argument
+	outStr, err = runDiffcov(t, tmpDir, "-a", filepath.Join(evalTmpDir, "main.go"))
+	if err != nil {
+		t.Fatalf("diffcov -a <abs>/main.go failed: %v, output:\n%s", err, outStr)
+	}
+	if !strings.Contains(outStr, "return a - b") {
+		t.Errorf("expected untested report for Sub in main.go, got:\n%s", outStr)
+	}
+
+	// 5. Run diffcov -a from subDir referencing ../sub/sub.go
+	outStr, err = runDiffcov(t, subDir, "-a", "../sub/sub.go")
+	if err != nil {
+		t.Fatalf("diffcov -a ../sub/sub.go failed: %v, output:\n%s", err, outStr)
+	}
+	if !strings.Contains(outStr, "return x + 10") {
+		t.Errorf("expected untested report for SubHelper in ../sub/sub.go, got:\n%s", outStr)
+	}
+
+	// 6. Error cases for -a: nonexistent file, no Go source files, unreadable directory
+	outStr, err = runDiffcov(t, tmpDir, "-a", "nonexistent.go")
+	if err == nil || !strings.Contains(outStr, "could not access nonexistent.go") {
+		t.Errorf("expected error for nonexistent.go, got err=%v, out:\n%s", err, outStr)
+	}
+
+	outStr, err = runDiffcov(t, tmpDir, "-a", "main_test.go")
+	if err == nil || !strings.Contains(outStr, "no Go source files found") {
+		t.Errorf("expected no Go source files found error, got err=%v, out:\n%s", err, outStr)
+	}
+
+	unreadableDir := filepath.Join(tmpDir, "unreadable")
+	if err := os.Mkdir(unreadableDir, 0000); err != nil {
+		t.Fatal(err)
+	}
+	defer os.Chmod(unreadableDir, 0755)
+	if _, readErr := os.ReadDir(unreadableDir); readErr != nil {
+		outStr, err = runDiffcov(t, tmpDir, "-a", "unreadable")
+		if err == nil || !strings.Contains(outStr, "could not read directory unreadable") {
+			t.Errorf("expected could not read directory error, got err=%v, out:\n%s", err, outStr)
+		}
 	}
 }
 

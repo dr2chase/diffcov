@@ -16,11 +16,13 @@ import (
 	"dr2cha.se/diffcov"
 )
 
+var osExit = os.Exit
+
 func fail(format string, args ...any) {
 	flag.Usage()
 	fmt.Fprintln(os.Stderr)
 	fmt.Fprintf(os.Stderr, format, args...)
-	os.Exit(1)
+	osExit(1)
 }
 
 // diffcov whatever.diff
