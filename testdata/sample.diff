@@ -22,7 +22,7 @@ index 09691ea..bf8ceb7 100644
  	diffs := flag.Args()[0]
  
  	diffcov.DoDiffs(diffs, coverprofile, diffDir, verbose)
-diff --git a/diffcov/diffcov.go b/diffcov/diffcov.go
+diff --git a/diffcov.go b/diffcov.go
 index 2f12925..b76e153 100644
 --- a/diffcov/diffcov.go
 +++ b/diffcov/diffcov.go

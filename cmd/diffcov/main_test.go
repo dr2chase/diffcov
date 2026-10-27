@@ -138,6 +138,7 @@ func TestFlagUsage(t *testing.T) {
 	out := stderr.String()
 	for _, expected := range []string{
 		"-a",
+		"-coverpkg",
 		"-git",
 		"-jj",
 		"-vcs",
@@ -645,6 +646,120 @@ func SubHelper(x int) int {
 		if err == nil || !strings.Contains(outStr, "could not read directory unreadable") {
 			t.Errorf("expected could not read directory error, got err=%v, out:\n%s", err, outStr)
 		}
+	}
+}
+
+func TestCoverPkgWorkflow(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not found in PATH")
+	}
+
+	tmpDir := t.TempDir()
+	runCmd(t, tmpDir, "git", "init")
+	runCmd(t, tmpDir, "git", "config", "user.name", "Test User")
+	runCmd(t, tmpDir, "git", "config", "user.email", "test@example.com")
+
+	goMod := "module example.com/multi\n\ngo 1.20\n"
+	if err := os.WriteFile(filepath.Join(tmpDir, "go.mod"), []byte(goMod), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	pkgaDir := filepath.Join(tmpDir, "pkga")
+	pkgbDir := filepath.Join(tmpDir, "pkgb")
+	if err := os.MkdirAll(pkgaDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(pkgbDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	bGoInitial := `package pkgb
+
+func Base() int {
+	return 1
+}
+`
+	if err := os.WriteFile(filepath.Join(pkgbDir, "b.go"), []byte(bGoInitial), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	aGo := `package pkga
+
+import "example.com/multi/pkgb"
+
+func CallB() int {
+	return pkgb.Base()
+}
+`
+	if err := os.WriteFile(filepath.Join(pkgaDir, "a.go"), []byte(aGo), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	aTestGo := `package pkga
+
+import (
+	"example.com/multi/pkgb"
+	"testing"
+)
+
+func TestCallB(t *testing.T) {
+	if CallB() != 1 || pkgb.UsedByA(5) != 6 {
+		t.Fail()
+	}
+}
+`
+	if err := os.WriteFile(filepath.Join(pkgaDir, "a_test.go"), []byte(aTestGo), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	runCmd(t, tmpDir, "git", "add", ".")
+	runCmd(t, tmpDir, "git", "commit", "-m", "initial commit")
+
+	// Modify pkgb/b.go with UsedByA (called by pkga's test) and UnusedByA (not called).
+	bGoModified := `package pkgb
+
+func Base() int {
+	return 1
+}
+
+func UsedByA(x int) int {
+	return x + 1
+}
+
+func UnusedByA(x int) int {
+	return x - 1
+}
+`
+	if err := os.WriteFile(filepath.Join(pkgbDir, "b.go"), []byte(bGoModified), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	// 1. Without -coverpkg, running from pkgaDir only instruments pkga,
+	// so UsedByA in pkgb/b.go is reported as Untested.
+	out, err := runDiffcov(t, pkgaDir, "-git")
+	if err != nil {
+		t.Fatalf("diffcov without -coverpkg failed: %v, output:\n%s", err, out)
+	}
+	if !strings.Contains(out, "return x + 1") {
+		t.Errorf("expected UsedByA to be untested without -coverpkg, got:\n%s", out)
+	}
+	if !strings.Contains(out, "return x - 1") {
+		t.Errorf("expected UnusedByA to be untested without -coverpkg, got:\n%s", out)
+	}
+
+	// 2. With -coverpkg, UsedByA is covered by pkga's test, while UnusedByA remains Untested.
+	out, err = runDiffcov(t, pkgaDir, "-git", "-coverpkg=example.com/multi/...", "-v")
+	if err != nil {
+		t.Fatalf("diffcov -coverpkg failed: %v, output:\n%s", err, out)
+	}
+	if !strings.Contains(out, "-coverpkg example.com/multi/...") {
+		t.Errorf("expected go test args to include '-coverpkg example.com/multi/...', got:\n%s", out)
+	}
+	if strings.Contains(out, "return x + 1") {
+		t.Errorf("expected UsedByA to be covered with -coverpkg, got:\n%s", out)
+	}
+	if !strings.Contains(out, "return x - 1") {
+		t.Errorf("expected UnusedByA to be untested with -coverpkg, got:\n%s", out)
 	}
 }
 

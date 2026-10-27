@@ -30,6 +30,7 @@ func main() {
 	var all bool
 	var verbose Count
 	var coverprofile string
+	var coverpkg string
 	var diffDir string
 	var diffFile string
 	var goCmd = "go"
@@ -45,6 +46,7 @@ func main() {
 	flag.BoolVar(&all, "a", false, "check coverage of entire source file(s) instead of diff")
 	flag.Var(&verbose, "v", "Says more and more")
 	flag.StringVar(&coverprofile, "c", coverprofile, "name of test -coverprofile output file")
+	flag.StringVar(&coverpkg, "coverpkg", coverpkg, "package pattern for 'go test -coverpkg'")
 	flag.StringVar(&diffFile, "d", diffFile, "name of (git or jj) diff output file")
 	flag.StringVar(&diffDir, "D", diffDir, "diff directory root (typically parent of git or jj repo root)")
 	flag.StringVar(&goCmd, "g", goCmd, "go command to use for running tests")
@@ -69,6 +71,7 @@ Running '%[1]s' with no options tends to work, so try that first and ignore the 
 '%[1]s -a [options] [-c coverprofile] [files or directories...]' reports any statements in the specified Go source files (or the current directory if none are specified) that do not appear in the coverprofile.
 If -d (and diffFile) is omitted (and -a is not specified), '%[1]s' will attempt to run 'git diff' or 'jj diff --git' (autodetected) to obtain the diff.
 If -c is omitted, '%[1]s' will attempt to run 'go test -coverprofile' to obtain coverage data.
+If -coverpkg is specified, '%[1]s' also passes '-coverpkg <pattern>' to 'go test'.
 If -M, -D, -S are not provided, %[1]s searches in parent directories for clues.
 
 To update: go install dr2cha.se/diffcov/...@latest
@@ -226,6 +229,9 @@ To update: go install dr2cha.se/diffcov/...@latest
 		coverprofile = filepath.Join(coverDir, "coverprofile.out")
 
 		testArgs := []string{"test", "-coverprofile", coverprofile}
+		if coverpkg != "" {
+			testArgs = append(testArgs, "-coverpkg", coverpkg)
+		}
 		var testDir string
 		if all {
 			var dirs []string
