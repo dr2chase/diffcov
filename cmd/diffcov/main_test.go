@@ -138,6 +138,7 @@ func TestFlagUsage(t *testing.T) {
 	out := stderr.String()
 	for _, expected := range []string{
 		"-a",
+		"-C",
 		"-coverpkg",
 		"-git",
 		"-jj",
@@ -152,8 +153,17 @@ func TestFlagUsage(t *testing.T) {
 }
 
 func TestConflictingFlags(t *testing.T) {
+	// Both -c and -C
+	out, err := runDiffcov(t, "", "-c", "cover.out", "-C", "coverdir")
+	if err == nil {
+		t.Errorf("expected error when passing -c and -C, got success")
+	}
+	if !strings.Contains(out, "cannot specify both -c and -C") {
+		t.Errorf("expected -c and -C conflict error, got:\n%s", out)
+	}
+
 	// Both -git and -jj
-	out, err := runDiffcov(t, "", "-git", "-jj")
+	out, err = runDiffcov(t, "", "-git", "-jj")
 	if err == nil {
 		t.Errorf("expected error when passing -git and -jj, got success")
 	}
@@ -760,6 +770,76 @@ func UnusedByA(x int) int {
 	}
 	if !strings.Contains(out, "return x - 1") {
 		t.Errorf("expected UnusedByA to be untested with -coverpkg, got:\n%s", out)
+	}
+}
+
+func TestCoverDirWorkflow(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	goMod := "module example.com/appcov\n\ngo 1.20\n"
+	if err := os.WriteFile(filepath.Join(tmpDir, "go.mod"), []byte(goMod), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	mainGo := `package main
+
+import "os"
+
+func CoveredFunc(x int) int {
+	return x + 42
+}
+
+func UncoveredFunc(x int) int {
+	return x - 42
+}
+
+func main() {
+	if CoveredFunc(1) != 43 {
+		os.Exit(1)
+	}
+}
+`
+	if err := os.WriteFile(filepath.Join(tmpDir, "main.go"), []byte(mainGo), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	appBin := filepath.Join(tmpDir, "app.exe")
+	runCmd(t, tmpDir, "go", "build", "-cover", "-o", appBin, ".")
+
+	coverDir := filepath.Join(tmpDir, "covdata")
+	if err := os.MkdirAll(coverDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	appCmd := exec.Command(appBin)
+	appCmd.Dir = tmpDir
+	appCmd.Env = append(os.Environ(), "GOCOVERDIR="+coverDir)
+	if out, err := appCmd.CombinedOutput(); err != nil {
+		t.Fatalf("running instrumented app failed: %v, output:\n%s", err, string(out))
+	}
+
+	// Run diffcov -a -C coverDir -v
+	out, err := runDiffcov(t, tmpDir, "-a", "-C", coverDir, "-v")
+	if err != nil {
+		t.Fatalf("diffcov -a -C failed: %v, output:\n%s", err, out)
+	}
+	if !strings.Contains(out, "covdata merge") || !strings.Contains(out, "covdata textfmt") {
+		t.Errorf("expected verbose output to show covdata merge and textfmt commands, got:\n%s", out)
+	}
+	if strings.Contains(out, "return x + 42") {
+		t.Errorf("expected CoveredFunc to be covered, got:\n%s", out)
+	}
+	if !strings.Contains(out, "return x - 42") {
+		t.Errorf("expected UncoveredFunc to be reported as untested, got:\n%s", out)
+	}
+
+	// Nonexistent coverdir should fail during covdata merge
+	out, err = runDiffcov(t, tmpDir, "-a", "-C", filepath.Join(tmpDir, "nonexistent"))
+	if err == nil {
+		t.Errorf("expected error for nonexistent coverdir, got success")
+	}
+	if !strings.Contains(out, "failed to run go tool covdata merge") {
+		t.Errorf("expected covdata merge error message, got:\n%s", out)
 	}
 }
 

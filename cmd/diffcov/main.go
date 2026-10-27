@@ -30,6 +30,7 @@ func main() {
 	var all bool
 	var verbose Count
 	var coverprofile string
+	var coverdir string
 	var coverpkg string
 	var diffDir string
 	var diffFile string
@@ -46,6 +47,7 @@ func main() {
 	flag.BoolVar(&all, "a", false, "check coverage of entire source file(s) instead of diff")
 	flag.Var(&verbose, "v", "Says more and more")
 	flag.StringVar(&coverprofile, "c", coverprofile, "name of test -coverprofile output file")
+	flag.StringVar(&coverdir, "C", coverdir, "name of directory containing application coverage data (GOCOVERDIR)")
 	flag.StringVar(&coverpkg, "coverpkg", coverpkg, "package pattern for 'go test -coverpkg'")
 	flag.StringVar(&diffFile, "d", diffFile, "name of (git or jj) diff output file")
 	flag.StringVar(&diffDir, "D", diffDir, "diff directory root (typically parent of git or jj repo root)")
@@ -67,10 +69,11 @@ func main() {
 Running '%[1]s' with no options tends to work, so try that first and ignore the rest of this documentation.
 '%[1]s' uses diff and test coverage data to point out any new or modified code in the diff that is not exercised by tests.
 
-'%[1]s [options] [-c coverprofile] [[-d] diffFile]' reports the new statements in diffFile that do not appear in the coverprofile.
-'%[1]s -a [options] [-c coverprofile] [files or directories...]' reports any statements in the specified Go source files (or the current directory if none are specified) that do not appear in the coverprofile.
+'%[1]s [options] [-c coverprofile | -C coverdir] [[-d] diffFile]' reports the new statements in diffFile that do not appear in the coverprofile.
+'%[1]s -a [options] [-c coverprofile | -C coverdir] [files or directories...]' reports any statements in the specified Go source files (or the current directory if none are specified) that do not appear in the coverprofile.
 If -d (and diffFile) is omitted (and -a is not specified), '%[1]s' will attempt to run 'git diff' or 'jj diff --git' (autodetected) to obtain the diff.
-If -c is omitted, '%[1]s' will attempt to run 'go test -coverprofile' to obtain coverage data.
+If -c and -C are omitted, '%[1]s' will attempt to run 'go test -coverprofile' to obtain coverage data.
+If -C is specified, '%[1]s' converts application coverage data in coverdir to a coverage profile using 'go tool covdata'.
 If -coverpkg is specified, '%[1]s' also passes '-coverpkg <pattern>' to 'go test'.
 If -M, -D, -S are not provided, %[1]s searches in parent directories for clues.
 
@@ -79,6 +82,10 @@ To update: go install dr2cha.se/diffcov/...@latest
 	}
 
 	flag.Parse()
+
+	if coverprofile != "" && coverdir != "" {
+		fail("cannot specify both -c and -C\n")
+	}
 
 	var err error
 	var diffBytes []byte
@@ -219,7 +226,45 @@ To update: go install dr2cha.se/diffcov/...@latest
 		}
 	}
 
-	if coverprofile == "" {
+	if coverdir != "" {
+		tmpDir, err := os.MkdirTemp("", "diffcov")
+		if err != nil {
+			fail("failed to create temporary dir, err=%v\n", err)
+		}
+		defer os.RemoveAll(tmpDir)
+
+		mergedDir := filepath.Join(tmpDir, "merged.data")
+		if err := os.Mkdir(mergedDir, 0755); err != nil {
+			fail("failed to create merged coverage dir, err=%v\n", err)
+		}
+		coverprofile = filepath.Join(tmpDir, "coverprofile.out")
+
+		mergeArgs := []string{"tool", "covdata", "merge", "-i=" + coverdir, "-o=" + mergedDir}
+		mergeCmd := exec.Command(goCmd, mergeArgs...)
+		if verbose > 0 {
+			fmt.Fprintf(os.Stderr, "Running %s, args=%v\n", goCmd, mergeArgs)
+		}
+		mergeOut, err := mergeCmd.CombinedOutput()
+		if err != nil {
+			fail("%s\nfailed to run %s tool covdata merge ..., err=%v\n", string(mergeOut), goCmd, err)
+		}
+		if verbose > 0 && len(mergeOut) > 0 {
+			fmt.Fprintf(os.Stderr, "%s\n", string(mergeOut))
+		}
+
+		textfmtArgs := []string{"tool", "covdata", "textfmt", "-i", mergedDir, "-o", coverprofile}
+		textfmtCmd := exec.Command(goCmd, textfmtArgs...)
+		if verbose > 0 {
+			fmt.Fprintf(os.Stderr, "Running %s, args=%v\n", goCmd, textfmtArgs)
+		}
+		textfmtOut, err := textfmtCmd.CombinedOutput()
+		if err != nil {
+			fail("%s\nfailed to run %s tool covdata textfmt ..., err=%v\n", string(textfmtOut), goCmd, err)
+		}
+		if verbose > 0 && len(textfmtOut) > 0 {
+			fmt.Fprintf(os.Stderr, "%s\n", string(textfmtOut))
+		}
+	} else if coverprofile == "" {
 		coverDir, err := os.MkdirTemp("", "diffcov")
 		if err != nil {
 			fail("failed to create temporary dir, err=%v\n", err)
