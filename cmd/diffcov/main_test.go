@@ -407,7 +407,7 @@ func TestAddAndMul(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	out, err = runDiffcov(t, tmpDir, "-v", "-g", goPath, "-d", "head.diffs")
+	out, err = runDiffcov(t, tmpDir, "-g", goPath, "-d", "head.diffs")
 	if err != nil {
 		t.Fatalf("diffcov -g %s -d head.diffs failed: %v, output:\n%s", goPath, err, out)
 	}
