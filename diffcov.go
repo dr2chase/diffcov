@@ -117,6 +117,9 @@ func doDiff(diff *diffparser.Diff, coverprofile string, diffDir, modDir string, 
 	for _, f := range diff.Files {
 		fn := f.NewName
 		if strings.HasSuffix(fn, "_test.go") {
+			if verbose > 0 {
+				fmt.Fprintf(os.Stderr, "skipping test file %s\n", fn)
+			}
 			continue
 		}
 
@@ -176,9 +179,12 @@ func doDiff(diff *diffparser.Diff, coverprofile string, diffDir, modDir string, 
 					modDepth++
 				}
 				if verbose > 1 {
-					fmt.Fprintf(os.Stderr, "Automated go.mod location for %s returns modDir=%s, modDepth=%d, err=%v\n", fn, curDir, modDepth, err)
+					fmt.Fprintf(os.Stderr, "Automated go.mod location for %s (%s) returns modDir=%s, modDepth=%d, err=%v\n", fn, absFn, curDir, modDepth, err)
 				}
-				must(err)
+				if err != nil {
+					fmt.Fprintf(os.Stderr, "Skipping %s (%s) because could not locate go.mod\n", fn, absFn)
+					continue
+				}
 				fileModDir = curDir
 				fileGomodpkg = parseGoModPkg(buf)
 			}
