@@ -153,17 +153,8 @@ func TestFlagUsage(t *testing.T) {
 }
 
 func TestConflictingFlags(t *testing.T) {
-	// Both -c and -C
-	out, err := runDiffcov(t, "", "-c", "cover.out", "-C", "coverdir")
-	if err == nil {
-		t.Errorf("expected error when passing -c and -C, got success")
-	}
-	if !strings.Contains(out, "cannot specify both -c and -C") {
-		t.Errorf("expected -c and -C conflict error, got:\n%s", out)
-	}
-
 	// Both -git and -jj
-	out, err = runDiffcov(t, "", "-git", "-jj")
+	out, err := runDiffcov(t, "", "-git", "-jj")
 	if err == nil {
 		t.Errorf("expected error when passing -git and -jj, got success")
 	}
@@ -840,6 +831,212 @@ func main() {
 	}
 	if !strings.Contains(out, "failed to run go tool covdata merge") {
 		t.Errorf("expected covdata merge error message, got:\n%s", out)
+	}
+}
+
+func TestCombineCoverageSources(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	goMod := "module example.com/combinecov\n\ngo 1.20\n"
+	if err := os.WriteFile(filepath.Join(tmpDir, "go.mod"), []byte(goMod), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	mainGo := `package main
+
+import "os"
+
+func ByProf1(x int) int {
+	return x + 101
+}
+
+func ByProf2(x int) int {
+	return x + 202
+}
+
+func ByAppCov(x int) int {
+	return x + 303
+}
+
+func Uncovered(x int) int {
+	return x - 999
+}
+
+func main() {
+	if ByAppCov(1) != 304 {
+		os.Exit(1)
+	}
+}
+`
+	if err := os.WriteFile(filepath.Join(tmpDir, "main.go"), []byte(mainGo), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	testGo := `package main
+
+import "testing"
+
+func TestProf1(t *testing.T) {
+	if ByProf1(1) != 102 {
+		t.Fail()
+	}
+}
+
+func TestProf2(t *testing.T) {
+	if ByProf2(1) != 203 {
+		t.Fail()
+	}
+}
+`
+	if err := os.WriteFile(filepath.Join(tmpDir, "main_test.go"), []byte(testGo), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Generate two distinct -coverprofile files (using set and count modes)
+	runCmd(t, tmpDir, "go", "test", "-run=^TestProf1$", "-coverprofile=prof1.out", ".")
+	runCmd(t, tmpDir, "go", "test", "-run=^TestProf2$", "-covermode=count", "-coverprofile=prof2.out", ".")
+
+	// Generate application coverage directory for -C
+	appBin := filepath.Join(tmpDir, "app.exe")
+	runCmd(t, tmpDir, "go", "build", "-cover", "-o", appBin, ".")
+	coverDir := filepath.Join(tmpDir, "covdata")
+	if err := os.MkdirAll(coverDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	appCmd := exec.Command(appBin)
+	appCmd.Dir = tmpDir
+	appCmd.Env = append(os.Environ(), "GOCOVERDIR="+coverDir)
+	if out, err := appCmd.CombinedOutput(); err != nil {
+		t.Fatalf("running instrumented app failed: %v, output:\n%s", err, string(out))
+	}
+
+	// 1. Single -c prof1.out
+	out, err := runDiffcov(t, tmpDir, "-a", "-c", "prof1.out", "main.go")
+	if err != nil {
+		t.Fatalf("diffcov -a -c prof1.out failed: %v, output:\n%s", err, out)
+	}
+	if strings.Contains(out, "return x + 101") {
+		t.Errorf("expected ByProf1 to be covered, got:\n%s", out)
+	}
+	for _, wantUntested := range []string{"return x + 202", "return x + 303", "return x - 999"} {
+		if !strings.Contains(out, wantUntested) {
+			t.Errorf("expected %q to be untested with only prof1.out, got:\n%s", wantUntested, out)
+		}
+	}
+
+	// 2. Repeated -c: -c prof1.out -c prof2.out
+	out, err = runDiffcov(t, tmpDir, "-a", "-c", "prof1.out", "-c", "prof2.out", "main.go")
+	if err != nil {
+		t.Fatalf("diffcov -a -c prof1.out -c prof2.out failed: %v, output:\n%s", err, out)
+	}
+	for _, wantCovered := range []string{"return x + 101", "return x + 202"} {
+		if strings.Contains(out, wantCovered) {
+			t.Errorf("expected %q to be covered with prof1+prof2, got:\n%s", wantCovered, out)
+		}
+	}
+	for _, wantUntested := range []string{"return x + 303", "return x - 999"} {
+		if !strings.Contains(out, wantUntested) {
+			t.Errorf("expected %q to be untested with prof1+prof2, got:\n%s", wantUntested, out)
+		}
+	}
+
+	// 3. -c and -C together: -c prof1.out -C covdata
+	out, err = runDiffcov(t, tmpDir, "-a", "-c", "prof1.out", "-C", coverDir, "main.go")
+	if err != nil {
+		t.Fatalf("diffcov -a -c prof1.out -C covdata failed: %v, output:\n%s", err, out)
+	}
+	for _, wantCovered := range []string{"return x + 101", "return x + 303"} {
+		if strings.Contains(out, wantCovered) {
+			t.Errorf("expected %q to be covered with prof1+covdata, got:\n%s", wantCovered, out)
+		}
+	}
+	for _, wantUntested := range []string{"return x + 202", "return x - 999"} {
+		if !strings.Contains(out, wantUntested) {
+			t.Errorf("expected %q to be untested with prof1+covdata, got:\n%s", wantUntested, out)
+		}
+	}
+
+	// 4. Repeated -c and -C together in diff mode with -v
+	diffText := `diff --git a/main.go b/main.go
+index 1111111..2222222 100644
+--- a/main.go
++++ b/main.go
+@@ -5,15 +5,15 @@ import "os"
+ func ByProf1(x int) int {
++	return x + 101
+ }
+ 
+ func ByProf2(x int) int {
++	return x + 202
+ }
+ 
+ func ByAppCov(x int) int {
++	return x + 303
+ }
+ 
+ func Uncovered(x int) int {
++	return x - 999
+ }
+`
+	if err := os.WriteFile(filepath.Join(tmpDir, "changes.diff"), []byte(diffText), 0644); err != nil {
+		t.Fatal(err)
+	}
+	out, err = runDiffcov(t, tmpDir, "-v", "-c", "prof1.out", "-c", "prof2.out", "-C", coverDir, "-d", "changes.diff")
+	if err != nil {
+		t.Fatalf("diffcov with -c prof1 -c prof2 -C covdata -d changes.diff failed: %v, output:\n%s", err, out)
+	}
+	if !strings.Contains(out, "Combining coverage profiles") {
+		t.Errorf("expected verbose output to mention combining coverage profiles, got:\n%s", out)
+	}
+	for _, wantCovered := range []string{"return x + 101", "return x + 202", "return x + 303"} {
+		if strings.Contains(out, wantCovered) {
+			t.Errorf("expected %q to be covered when combining all sources, got:\n%s", wantCovered, out)
+		}
+	}
+	if !strings.Contains(out, "return x - 999") {
+		t.Errorf("expected Uncovered to be reported as untested, got:\n%s", out)
+	}
+
+	// 5. Garbage lines and CRLF in combined profile preserve -q behavior
+	garbageProf := "mode: set\r\ngarbage_no_space\r\ngarbage badcount\r\n"
+	if err := os.WriteFile(filepath.Join(tmpDir, "garbage.out"), []byte(garbageProf), 0644); err != nil {
+		t.Fatal(err)
+	}
+	out, err = runDiffcov(t, tmpDir, "-a", "-c", "prof1.out", "-c", "garbage.out", "main.go")
+	if err != nil {
+		t.Fatalf("diffcov with garbage profile failed: %v, output:\n%s", err, out)
+	}
+	if !strings.Contains(out, "failed to match cover line RE") {
+		t.Errorf("expected warning on garbage cover line without -q, got:\n%s", out)
+	}
+	out, err = runDiffcov(t, tmpDir, "-a", "-q", "-c", "prof1.out", "-c", "garbage.out", "main.go")
+	if err != nil {
+		t.Fatalf("diffcov -q with garbage profile failed: %v, output:\n%s", err, out)
+	}
+	if strings.Contains(out, "failed to match cover line RE") {
+		t.Errorf("expected -q to suppress garbage cover line warning, got:\n%s", out)
+	}
+
+	// 6. Error handling for nonexistent -c files (single and repeated)
+	out, err = runDiffcov(t, tmpDir, "-a", "-c", "missing.out", "main.go")
+	if err == nil || !strings.Contains(out, "could not read coverprofile from missing.out") {
+		t.Errorf("expected error for single missing -c file, got err=%v, out:\n%s", err, out)
+	}
+	out, err = runDiffcov(t, tmpDir, "-a", "-c", "prof1.out", "-c", "missing.out", "main.go")
+	if err == nil || !strings.Contains(out, "could not read coverprofile from missing.out") {
+		t.Errorf("expected error for missing second -c file, got err=%v, out:\n%s", err, out)
+	}
+
+	// 7. Error handling when temporary directory creation fails
+	badTmp := filepath.Join(tmpDir, "nonexistent-parent", "tmp")
+	t.Setenv("TMPDIR", badTmp)
+	t.Setenv("TMP", badTmp)
+	t.Setenv("TEMP", badTmp)
+	if _, probeErr := os.MkdirTemp("", "probe"); probeErr != nil {
+		out, err = runDiffcov(t, tmpDir, "-a", "-c", "prof1.out", "-c", "prof2.out", "main.go")
+		if err == nil || !strings.Contains(out, "failed to create temporary dir") {
+			t.Errorf("expected failed to create temporary dir error, got err=%v, out:\n%s", err, out)
+		}
 	}
 }
 

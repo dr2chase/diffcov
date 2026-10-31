@@ -29,7 +29,7 @@ func fail(format string, args ...any) {
 func main() {
 	var all bool
 	var verbose Count
-	var coverprofile string
+	var coverprofiles stringSlice
 	var coverdir string
 	var coverpkg string
 	var diffDir string
@@ -46,7 +46,7 @@ func main() {
 
 	flag.BoolVar(&all, "a", false, "check coverage of entire source file(s) instead of diff")
 	flag.Var(&verbose, "v", "Says more and more")
-	flag.StringVar(&coverprofile, "c", coverprofile, "name of test -coverprofile output file")
+	flag.Var(&coverprofiles, "c", "name of test -coverprofile output `file` (may be repeated)")
 	flag.StringVar(&coverdir, "C", coverdir, "name of directory containing application coverage data (GOCOVERDIR)")
 	flag.StringVar(&coverpkg, "coverpkg", coverpkg, "package pattern for 'go test -coverpkg'")
 	flag.StringVar(&diffFile, "d", diffFile, "name of (git or jj) diff output file")
@@ -69,11 +69,12 @@ func main() {
 Running '%[1]s' with no options tends to work, so try that first and ignore the rest of this documentation.
 '%[1]s' uses diff and test coverage data to point out any new or modified code in the diff that is not exercised by tests.
 
-'%[1]s [options] [-c coverprofile | -C coverdir] [[-d] diffFile]' reports the new statements in diffFile that do not appear in the coverprofile.
-'%[1]s -a [options] [-c coverprofile | -C coverdir] [files or directories...]' reports any statements in the specified Go source files (or the current directory if none are specified) that do not appear in the coverprofile.
+'%[1]s [options] [-c coverprofile]... [-C coverdir] [[-d] diffFile]' reports the new statements in diffFile that do not appear in the coverage data.
+'%[1]s -a [options] [-c coverprofile]... [-C coverdir] [files or directories...]' reports any statements in the specified Go source files (or the current directory if none are specified) that do not appear in the coverage data.
 If -d (and diffFile) is omitted (and -a is not specified), '%[1]s' will attempt to run 'git diff' or 'jj diff --git' (autodetected) to obtain the diff.
 If -c and -C are omitted, '%[1]s' will attempt to run 'go test -coverprofile' to obtain coverage data.
 If -C is specified, '%[1]s' converts application coverage data in coverdir to a coverage profile using 'go tool covdata'.
+Multiple coverage sources (-c may be repeated, and combined with -C) are combined into one.
 If -coverpkg is specified, '%[1]s' also passes '-coverpkg <pattern>' to 'go test'.
 If -M, -D, -S are not provided, %[1]s searches in parent directories for clues.
 
@@ -82,10 +83,6 @@ To update: go install dr2cha.se/diffcov/...@latest
 	}
 
 	flag.Parse()
-
-	if coverprofile != "" && coverdir != "" {
-		fail("cannot specify both -c and -C\n")
-	}
 
 	var err error
 	var diffBytes []byte
@@ -216,7 +213,7 @@ To update: go install dr2cha.se/diffcov/...@latest
 				}
 			}
 			if verbose > 0 {
-				fmt.Fprintf(os.Stderr, "diffFile=%s, coverprofile=%s, \n", diffFile, coverprofile)
+				fmt.Fprintf(os.Stderr, "diffFile=%s, coverprofiles=%s, coverdir=%s\n", diffFile, coverprofiles.String(), coverdir)
 			}
 
 			diffBytes, err = os.ReadFile(diffFile)
@@ -226,18 +223,32 @@ To update: go install dr2cha.se/diffcov/...@latest
 		}
 	}
 
-	if coverdir != "" {
-		tmpDir, err := os.MkdirTemp("", "diffcov")
-		if err != nil {
-			fail("failed to create temporary dir, err=%v\n", err)
+	var tmpDir string
+	getTmpDir := func() string {
+		if tmpDir == "" {
+			tmpDir, err = os.MkdirTemp("", "diffcov")
+			if err != nil {
+				fail("failed to create temporary dir, err=%v\n", err)
+			}
 		}
-		defer os.RemoveAll(tmpDir)
+		return tmpDir
+	}
+	defer func() {
+		if tmpDir != "" {
+			os.RemoveAll(tmpDir)
+		}
+	}()
 
-		mergedDir := filepath.Join(tmpDir, "merged.data")
+	var coverprofile string
+	profileSources := append([]string(nil), coverprofiles...)
+
+	if coverdir != "" {
+		td := getTmpDir()
+		mergedDir := filepath.Join(td, "merged.data")
 		if err := os.Mkdir(mergedDir, 0755); err != nil {
 			fail("failed to create merged coverage dir, err=%v\n", err)
 		}
-		coverprofile = filepath.Join(tmpDir, "coverprofile.out")
+		covdirProfile := filepath.Join(td, "covdata.out")
 
 		mergeArgs := []string{"tool", "covdata", "merge", "-i=" + coverdir, "-o=" + mergedDir}
 		mergeCmd := exec.Command(goCmd, mergeArgs...)
@@ -252,7 +263,7 @@ To update: go install dr2cha.se/diffcov/...@latest
 			fmt.Fprintf(os.Stderr, "%s\n", string(mergeOut))
 		}
 
-		textfmtArgs := []string{"tool", "covdata", "textfmt", "-i", mergedDir, "-o", coverprofile}
+		textfmtArgs := []string{"tool", "covdata", "textfmt", "-i", mergedDir, "-o", covdirProfile}
 		textfmtCmd := exec.Command(goCmd, textfmtArgs...)
 		if verbose > 0 {
 			fmt.Fprintf(os.Stderr, "Running %s, args=%v\n", goCmd, textfmtArgs)
@@ -264,14 +275,11 @@ To update: go install dr2cha.se/diffcov/...@latest
 		if verbose > 0 && len(textfmtOut) > 0 {
 			fmt.Fprintf(os.Stderr, "%s\n", string(textfmtOut))
 		}
-	} else if coverprofile == "" {
-		coverDir, err := os.MkdirTemp("", "diffcov")
-		if err != nil {
-			fail("failed to create temporary dir, err=%v\n", err)
-		}
-		defer os.RemoveAll(coverDir)
+		profileSources = append(profileSources, covdirProfile)
+	}
 
-		coverprofile = filepath.Join(coverDir, "coverprofile.out")
+	if len(profileSources) == 0 {
+		coverprofile = filepath.Join(getTmpDir(), "coverprofile.out")
 
 		testArgs := []string{"test", "-coverprofile", coverprofile}
 		if coverpkg != "" {
@@ -325,6 +333,19 @@ To update: go install dr2cha.se/diffcov/...@latest
 		if verbose > 0 {
 			fmt.Fprintf(os.Stderr, "%s\n", string(coverOut))
 		}
+	} else if len(profileSources) == 1 {
+		coverprofile = profileSources[0]
+		if _, err := os.Stat(coverprofile); err != nil {
+			fail("could not read coverprofile from %s, error was %v\n", coverprofile, err)
+		}
+	} else {
+		coverprofile = filepath.Join(getTmpDir(), "combined.out")
+		if verbose > 0 {
+			fmt.Fprintf(os.Stderr, "Combining coverage profiles %v into %s\n", profileSources, coverprofile)
+		}
+		if err := combineCoverProfiles(coverprofile, profileSources); err != nil {
+			fail("%v\n", err)
+		}
 	}
 
 	if all {
@@ -332,6 +353,58 @@ To update: go install dr2cha.se/diffcov/...@latest
 	} else {
 		diffcov.DoDiffs(diffBytes, coverprofile, diffDir, modDir, strip, int(verbose), showTested, quiet)
 	}
+}
+
+// combineCoverProfiles merges multiple Go coverage profile files into dst
+// using "mode: set" so a block is marked covered if covered in any input profile.
+func combineCoverProfiles(dst string, srcFiles []string) error {
+	var keys []string
+	covered := make(map[string]int)
+	var out strings.Builder
+	out.WriteString("mode: set\n")
+
+	for _, src := range srcFiles {
+		buf, err := os.ReadFile(src)
+		if err != nil {
+			return fmt.Errorf("could not read coverprofile from %s, error was %v", src, err)
+		}
+		for _, line := range strings.Split(string(buf), "\n") {
+			line = strings.TrimSuffix(line, "\r")
+			if line == "" || strings.HasPrefix(line, "mode: ") {
+				continue
+			}
+			if i := strings.LastIndexByte(line, ' '); i != -1 {
+				if n, err := strconv.ParseUint(line[i+1:], 10, 64); err == nil {
+					key := line[:i]
+					if _, ok := covered[key]; !ok {
+						keys = append(keys, key)
+						covered[key] = 0
+					}
+					if n > 0 {
+						covered[key] = 1
+					}
+					continue
+				}
+			}
+			out.WriteString(line)
+			out.WriteByte('\n')
+		}
+	}
+	for _, key := range keys {
+		fmt.Fprintf(&out, "%s %d\n", key, covered[key])
+	}
+	return os.WriteFile(dst, []byte(out.String()), 0644)
+}
+
+type stringSlice []string
+
+func (s *stringSlice) String() string {
+	return strings.Join(*s, ",")
+}
+
+func (s *stringSlice) Set(val string) error {
+	*s = append(*s, val)
+	return nil
 }
 
 // Count is a flag.Value that is like a flag.Bool and a flag.Int.

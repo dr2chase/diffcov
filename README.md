@@ -59,6 +59,9 @@ diffcov -c cover.out
 # Using application coverage data (GOCOVERDIR)
 diffcov -C coverdir
 
+# Combining multiple coverage sources (-c may be repeated and used with -C)
+diffcov -c unit.out -c integration.out -C coverdir
+
 # Using an existing diff file
 diffcov changes.diff
 
@@ -86,8 +89,8 @@ Note: `-staged` and `-cached` require Git; Jujutsu does not have a staging area.
 | `-a` | Check coverage of entire source file(s) instead of using diff input. |
 | `-staged`, `-cached` | Use `git diff --staged` to obtain diff (Git only). |
 | `-t` | Also show tested lines. |
-| `-c <file>` | Path to coverage profile (`go test -coverprofile` output). |
-| `-C <dir>` | Path to application coverage directory (`GOCOVERDIR`), converted via `go tool covdata`. |
+| `-c <file>` | Path to coverage profile (`go test -coverprofile` output); may be repeated and combined with `-C`. |
+| `-C <dir>` | Path to application coverage directory (`GOCOVERDIR`), converted via `go tool covdata`; may be combined with `-c`. |
 | `-coverpkg <pattern>` | Package pattern for `go test -coverpkg` (e.g. `all` or `./...`). |
 | `-d <file>` | Path to diff file (or pass as a single positional argument). |
 | `-g <cmd>` | Go command to use for running tests (default `go`). |
