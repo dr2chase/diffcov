@@ -5,8 +5,10 @@
 package main
 
 import (
+	"compress/gzip"
 	"flag"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -14,6 +16,8 @@ import (
 	"strings"
 
 	"dr2cha.se/diffcov"
+	"github.com/klauspost/compress/zstd"
+	"github.com/ulikunitz/xz/v2"
 )
 
 var osExit = os.Exit
@@ -46,7 +50,7 @@ func main() {
 
 	flag.BoolVar(&all, "a", false, "check coverage of entire source file(s) instead of diff")
 	flag.Var(&verbose, "v", "Says more and more")
-	flag.Var(&coverprofiles, "c", "name of test -coverprofile output `file` (may be repeated)")
+	flag.Var(&coverprofiles, "c", "name of test -coverprofile output `file` (may be repeated; .gz, .xz, .zst/.zstd auto-decompressed)")
 	flag.StringVar(&coverdir, "C", coverdir, "name of directory containing application coverage data (GOCOVERDIR)")
 	flag.StringVar(&coverpkg, "coverpkg", coverpkg, "package pattern for 'go test -coverpkg'")
 	flag.StringVar(&diffFile, "d", diffFile, "name of (git or jj) diff output file")
@@ -333,7 +337,7 @@ To update: go install dr2cha.se/diffcov/...@latest
 		if verbose > 0 {
 			fmt.Fprintf(os.Stderr, "%s\n", string(coverOut))
 		}
-	} else if len(profileSources) == 1 {
+	} else if len(profileSources) == 1 && compressionKind(profileSources[0]) == "" {
 		coverprofile = profileSources[0]
 		if _, err := os.Stat(coverprofile); err != nil {
 			fail("could not read coverprofile from %s, error was %v\n", coverprofile, err)
@@ -355,7 +359,55 @@ To update: go install dr2cha.se/diffcov/...@latest
 	}
 }
 
-// combineCoverProfiles merges multiple Go coverage profile files into dst
+func compressionKind(path string) string {
+	switch strings.ToLower(filepath.Ext(path)) {
+	case ".gz":
+		return "gz"
+	case ".xz":
+		return "xz"
+	case ".zst", ".zstd":
+		return "zstd"
+	default:
+		return ""
+	}
+}
+
+func readCoverFile(src string) ([]byte, error) {
+	f, err := os.Open(src)
+	if err != nil {
+		return nil, fmt.Errorf("could not read coverprofile from %s, error was %v", src, err)
+	}
+	defer f.Close()
+
+	var r io.Reader = f
+	switch compressionKind(src) {
+	case "gz":
+		gr, err := gzip.NewReader(f)
+		if err != nil {
+			return nil, fmt.Errorf("could not decompress coverprofile %s, error was %v", src, err)
+		}
+		defer gr.Close()
+		r = gr
+	case "xz":
+		xr, err := xz.NewReader(f)
+		if err != nil {
+			return nil, fmt.Errorf("could not decompress coverprofile %s, error was %v", src, err)
+		}
+		defer xr.Close()
+		r = xr
+	case "zstd":
+		zr, _ := zstd.NewReader(f)
+		defer zr.Close()
+		r = zr
+	}
+	data, err := io.ReadAll(r)
+	if err != nil {
+		return nil, fmt.Errorf("could not read coverprofile from %s, error was %v", src, err)
+	}
+	return data, nil
+}
+
+// combineCoverProfiles merges one or more Go coverage profile files into dst
 // using "mode: set" so a block is marked covered if covered in any input profile.
 func combineCoverProfiles(dst string, srcFiles []string) error {
 	var keys []string
@@ -364,9 +416,9 @@ func combineCoverProfiles(dst string, srcFiles []string) error {
 	out.WriteString("mode: set\n")
 
 	for _, src := range srcFiles {
-		buf, err := os.ReadFile(src)
+		buf, err := readCoverFile(src)
 		if err != nil {
-			return fmt.Errorf("could not read coverprofile from %s, error was %v", src, err)
+			return err
 		}
 		for _, line := range strings.Split(string(buf), "\n") {
 			line = strings.TrimSuffix(line, "\r")

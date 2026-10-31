@@ -6,6 +6,7 @@ package main
 
 import (
 	"bytes"
+	"compress/gzip"
 	"flag"
 	"fmt"
 	"io"
@@ -15,6 +16,9 @@ import (
 	"strings"
 	"sync"
 	"testing"
+
+	"github.com/klauspost/compress/zstd"
+	"github.com/ulikunitz/xz/v2"
 )
 
 var (
@@ -1036,6 +1040,155 @@ index 1111111..2222222 100644
 		out, err = runDiffcov(t, tmpDir, "-a", "-c", "prof1.out", "-c", "prof2.out", "main.go")
 		if err == nil || !strings.Contains(out, "failed to create temporary dir") {
 			t.Errorf("expected failed to create temporary dir error, got err=%v, out:\n%s", err, out)
+		}
+	}
+}
+
+func TestCompressedCoverProfiles(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	goMod := "module example.com/compcov\n\ngo 1.20\n"
+	if err := os.WriteFile(filepath.Join(tmpDir, "go.mod"), []byte(goMod), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	mainGo := `package compcov
+
+func ByGzip(x int) int {
+	return x + 11
+}
+
+func ByXZ(x int) int {
+	return x + 22
+}
+
+func ByZstd(x int) int {
+	return x + 33
+}
+
+func Never(x int) int {
+	return x - 44
+}
+`
+	if err := os.WriteFile(filepath.Join(tmpDir, "main.go"), []byte(mainGo), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	profGzip := "mode: set\nexample.com/compcov/main.go:3.23,5.2 1 1\nexample.com/compcov/main.go:7.21,9.2 1 0\nexample.com/compcov/main.go:11.23,13.2 1 0\nexample.com/compcov/main.go:15.22,17.2 1 0\n"
+	profXZ := "mode: set\nexample.com/compcov/main.go:3.23,5.2 1 0\nexample.com/compcov/main.go:7.21,9.2 1 1\nexample.com/compcov/main.go:11.23,13.2 1 0\nexample.com/compcov/main.go:15.22,17.2 1 0\n"
+	profZstd := "mode: set\nexample.com/compcov/main.go:3.23,5.2 1 0\nexample.com/compcov/main.go:7.21,9.2 1 0\nexample.com/compcov/main.go:11.23,13.2 1 1\nexample.com/compcov/main.go:15.22,17.2 1 0\n"
+
+	writeGzip := func(name, content string) {
+		var buf bytes.Buffer
+		gw := gzip.NewWriter(&buf)
+		if _, err := gw.Write([]byte(content)); err != nil {
+			t.Fatal(err)
+		}
+		if err := gw.Close(); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(tmpDir, name), buf.Bytes(), 0644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	writeXZ := func(name, content string) {
+		var buf bytes.Buffer
+		xw, err := xz.NewWriter(&buf)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := xw.Write([]byte(content)); err != nil {
+			t.Fatal(err)
+		}
+		if err := xw.Close(); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(tmpDir, name), buf.Bytes(), 0644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	writeZstd := func(name, content string) {
+		var buf bytes.Buffer
+		zw, err := zstd.NewWriter(&buf)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := zw.Write([]byte(content)); err != nil {
+			t.Fatal(err)
+		}
+		if err := zw.Close(); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(tmpDir, name), buf.Bytes(), 0644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	for _, ext := range []string{".gz", ".GZ"} {
+		name := "cov1" + ext
+		writeGzip(name, profGzip)
+		out, err := runDiffcov(t, tmpDir, "-a", "-c", name, "main.go")
+		if err != nil {
+			t.Fatalf("single -c %s failed: %v, out:\n%s", name, err, out)
+		}
+		if strings.Contains(out, "return x + 11") || !strings.Contains(out, "return x + 22") {
+			t.Errorf("unexpected coverage for %s:\n%s", name, out)
+		}
+	}
+
+	for _, ext := range []string{".xz", ".XZ"} {
+		name := "cov2" + ext
+		writeXZ(name, profXZ)
+		out, err := runDiffcov(t, tmpDir, "-a", "-c", name, "main.go")
+		if err != nil {
+			t.Fatalf("single -c %s failed: %v, out:\n%s", name, err, out)
+		}
+		if strings.Contains(out, "return x + 22") || !strings.Contains(out, "return x + 11") {
+			t.Errorf("unexpected coverage for %s:\n%s", name, out)
+		}
+	}
+
+	for _, ext := range []string{".zst", ".ZST", ".zstd", ".ZSTD"} {
+		name := "cov3" + ext
+		writeZstd(name, profZstd)
+		out, err := runDiffcov(t, tmpDir, "-a", "-c", name, "main.go")
+		if err != nil {
+			t.Fatalf("single -c %s failed: %v, out:\n%s", name, err, out)
+		}
+		if strings.Contains(out, "return x + 33") || !strings.Contains(out, "return x + 11") {
+			t.Errorf("unexpected coverage for %s:\n%s", name, out)
+		}
+	}
+
+	// Combine .gz, .XZ, and .zstd together
+	out, err := runDiffcov(t, tmpDir, "-a", "-c", "cov1.gz", "-c", "cov2.XZ", "-c", "cov3.zstd", "main.go")
+	if err != nil {
+		t.Fatalf("combined compressed -c failed: %v, out:\n%s", err, out)
+	}
+	for _, coveredStmt := range []string{"return x + 11", "return x + 22", "return x + 33"} {
+		if strings.Contains(out, coveredStmt) {
+			t.Errorf("expected %q to be covered in combined compressed run, got:\n%s", coveredStmt, out)
+		}
+	}
+	if !strings.Contains(out, "return x - 44") {
+		t.Errorf("expected Never to remain untested, got:\n%s", out)
+	}
+
+	// Error cases: missing compressed file and corrupt .gz, .xz, and .zst files
+	out, err = runDiffcov(t, tmpDir, "-a", "-c", "missing.gz", "main.go")
+	if err == nil || !strings.Contains(out, "could not read coverprofile from missing.gz") {
+		t.Errorf("expected missing.gz error, got err=%v, out:\n%s", err, out)
+	}
+
+	for _, badFile := range []string{"bad.gz", "bad.xz", "bad.zst"} {
+		if err := os.WriteFile(filepath.Join(tmpDir, badFile), []byte("not valid compressed data"), 0644); err != nil {
+			t.Fatal(err)
+		}
+		out, err = runDiffcov(t, tmpDir, "-a", "-c", badFile, "main.go")
+		if err == nil {
+			t.Errorf("expected error for corrupt %s, got success with out:\n%s", badFile, out)
 		}
 	}
 }
